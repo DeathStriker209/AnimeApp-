@@ -18,10 +18,12 @@
     "files": [
       "main.js",
       "preload.js",
-      "renderer/**/*"
+      "renderer/**/*",
+      "assets/**/*"
     ],
     "win": {
-      "target": "portable"
+      "target": "portable",
+      "icon": "assets/icon.ico"
     },
     "portable": {
       "artifactName": "AnimeStreamPlus.exe"

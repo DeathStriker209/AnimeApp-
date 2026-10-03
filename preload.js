@@ -6,5 +6,6 @@ contextBridge.exposeInMainWorld('api', {
   readSubtitle: (p) => ipcRenderer.invoke('read-subtitle', p),
   fileExists: (p) => ipcRenderer.invoke('file-exists', p),
   openExternal: (url) => ipcRenderer.invoke('open-external', url),
+  anilistLogin: (clientId) => ipcRenderer.invoke('anilist-login', clientId),
   onZoom: (cb) => ipcRenderer.on('zoom-changed', (_e, pct) => cb(pct))
 });

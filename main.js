@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog, shell, session } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, shell } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const { pathToFileURL } = require('url');
@@ -37,7 +37,11 @@ function createWindow() {
     minHeight: 640,
     backgroundColor: '#0a101a',
     title: 'Anime Stream+',
+    icon: path.join(__dirname, 'assets', 'icon.png'),
     autoHideMenuBar: true,
+    // Replace the default (blue) Windows title bar with one that matches the app
+    titleBarStyle: 'hidden',
+    titleBarOverlay: { color: '#0e1624', symbolColor: '#e9eef6', height: 64 },
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -119,21 +123,44 @@ ipcMain.handle('file-exists', async (_e, p) => {
   try { return !!p && fs.existsSync(p); } catch { return false; }
 });
 
+// AniList login: opens AniList's sign-in page and catches the access token it sends back
+ipcMain.handle('anilist-login', async (event, clientId) => {
+  if (!/^\d+$/.test(String(clientId || ''))) return { error: 'Enter your AniList client ID (a number) first.' };
+  const parent = BrowserWindow.fromWebContents(event.sender);
+  return new Promise((resolve) => {
+    let done = false;
+    const win = new BrowserWindow({
+      parent, modal: true, width: 520, height: 760, autoHideMenuBar: true,
+      backgroundColor: '#0b1622', title: 'Log in to AniList',
+      icon: path.join(__dirname, 'assets', 'icon.png'),
+      webPreferences: { partition: 'persist:anilist', contextIsolation: true, nodeIntegration: false }
+    });
+    const check = (url) => {
+      const m = String(url).match(/[#&?]access_token=([^&]+)/);
+      if (m && !done) {
+        done = true;
+        resolve({ token: decodeURIComponent(m[1]) });
+        setTimeout(() => { if (!win.isDestroyed()) win.close(); }, 300);
+      }
+    };
+    win.webContents.on('will-redirect', (_e, url) => check(url));
+    win.webContents.on('will-navigate', (_e, url) => check(url));
+    win.webContents.on('did-navigate', (_e, url) => check(url));
+    win.webContents.on('did-navigate-in-page', (_e, url) => check(url));
+    win.webContents.setWindowOpenHandler(({ url }) => {
+      if (/^https?:\/\//i.test(url)) shell.openExternal(url);
+      return { action: 'deny' };
+    });
+    win.on('closed', () => { if (!done) resolve({ cancelled: true }); });
+    win.loadURL(`https://anilist.co/api/v2/oauth/authorize?client_id=${encodeURIComponent(clientId)}&response_type=token`);
+  });
+});
+
 ipcMain.handle('open-external', async (_e, url) => {
   if (/^https?:\/\//i.test(url)) await shell.openExternal(url);
 });
 
 app.whenReady().then(() => {
-  // YouTube embeds refuse to play (error 153) when the page sends no Referer, which is the case for
-  // apps loaded from local files. Add one to YouTube embed requests that don't have it.
-  session.defaultSession.webRequest.onBeforeSendHeaders(
-    { urls: ['https://www.youtube.com/*', 'https://www.youtube-nocookie.com/*'] },
-    (details, callback) => {
-      const h = details.requestHeaders;
-      if (!h.Referer && !h.referer) h.Referer = 'https://www.youtube.com/';
-      callback({ requestHeaders: h });
-    }
-  );
   createWindow();
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
