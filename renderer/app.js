@@ -304,6 +304,7 @@ const VIEWS = {
     const keys = [
       ['← ↑ → ↓', 'Move around the app'], ['Enter', 'Open / select'],
       ['Esc or Backspace or Alt+←', 'Go back a page'], ['Alt+→', 'Go forward a page'], ['/', 'Jump to search'],
+      ['Ctrl + = or Ctrl + scroll up', 'Zoom in'], ['Ctrl + - or Ctrl + scroll down', 'Zoom out'], ['Ctrl + 0', 'Reset zoom'],
       ['Space or K', 'Play / pause'], ['← or J', `Back ${skip} seconds`], ['→ or L', `Forward ${skip} seconds`],
       ['↑ / ↓', 'Volume'], ['F', 'Fullscreen'], ['M', 'Mute'], ['C', 'Subtitles'], ['N / P', 'Next / previous episode'],
       ['E', 'Episode list (then ↑ ↓ Enter)'], ['0–9', 'Jump to 0%–90%']
@@ -1192,6 +1193,7 @@ function tick() {
 }
 tick(); setInterval(tick, 10000);
 updateAvatar();
+bridge?.onZoom?.((pct) => toast(`Zoom ${pct}%  (Ctrl + 0 to reset)`));
 window.addEventListener('beforeunload', saveProgress);
 
 render();
