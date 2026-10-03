@@ -401,6 +401,11 @@ img.avatar.big { object-fit: cover; background: var(--panel-2); }
 .al-help summary { cursor: pointer; color: var(--accent); font-weight: 600; width: max-content; border-radius: 4px; }
 .al-help p { margin: 10px 0 4px; }
 
+.src-list { display: grid; gap: 8px; margin-bottom: 14px; }
+.src-row { display: grid; grid-template-columns: 160px 1fr auto; align-items: center; gap: 14px; background: var(--panel-2); border-radius: 8px; padding: 8px 10px 8px 14px; }
+.src-row span { color: var(--muted); font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.field input.wide-input { width: min(460px, 70vw); }
+
 /* ---------- My List ---------- */
 .list-head { display: flex; align-items: center; gap: 12px; color: var(--muted); font-size: 14px; margin: -6px 0 16px; }
 .list-head img { width: 30px; height: 30px; border-radius: 50%; object-fit: cover; }

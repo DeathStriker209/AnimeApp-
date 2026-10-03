@@ -232,6 +232,12 @@ modal.addEventListener('click', async (e) => {
   try { await setListStatus(m, b.dataset.status || null); closeModal(); }
   catch (err) { toast(err.message); $$('button', modal).forEach((x) => { x.disabled = false; }); }
 });
+const getSources = () => store.get('sources', []);
+function sourceURL(src, m) {
+  const en = m.title?.english || m.title?.romaji || '', ro = m.title?.romaji || en;
+  return src.url.replace(/\{(title|query)\}/gi, encodeURIComponent(en))
+    .replace(/\{english\}/gi, encodeURIComponent(en)).replace(/\{romaji\}/gi, encodeURIComponent(ro));
+}
 const getHistory = () => store.get('history', {});
 const getLibrary = () => store.get('library', {});
 
@@ -506,6 +512,19 @@ const VIEWS = {
       <div class="settings-block"><h3>Stats</h3>
         <div class="stats"><div><b>${hist}</b>continue watching</div><div><b>${list}</b>in My List</div><div><b>${lib}</b>with files on disk</div></div>
       </div>
+      <div class="settings-block" id="sources-block"><h3>Sources</h3>
+        <p>Add any website you use. On each anime page you'll get a button that opens the site in your browser and searches for that anime.
+        In the link, put <code>{title}</code> where the anime name goes, for example <code>https://example.com/search?q={title}</code>.
+        Use <code>{romaji}</code> instead if the site uses Japanese names.</p>
+        ${getSources().length ? `<div class="src-list">${getSources().map((src, i) => `<div class="src-row">
+            <b>${esc(src.name)}</b><span>${esc(src.url)}</span>
+            <button class="btn small danger" data-nav data-action="src-del" data-idx="${i}">Remove</button></div>`).join('')}</div>` : ''}
+        <div class="field-row">
+          <label class="field">Name <input id="src-name" type="text" data-nav maxlength="30" placeholder="My site"></label>
+          <label class="field">Link <input id="src-url" class="wide-input" type="text" data-nav spellcheck="false" placeholder="https://…/search?q={title}"></label>
+          <button class="btn primary" data-nav data-action="src-add">Add source</button>
+        </div>
+      </div>
       <div class="settings-block"><h3>Skip forward and back</h3>
         <p>How far the skip buttons, arrow keys and double-click jump in the player.</p>
         <div class="chips">${[5, 10, 15, 20].map((n) => `<button class="chip ${n === skip ? 'on' : ''}" data-nav data-action="set-skip" data-skip="${n}">${n} seconds</button>`).join('')}</div>
@@ -634,6 +653,11 @@ const VIEWS = {
         </div>
         ${streaming.length ? `<div class="d-section"><h2 class="section">Where to watch</h2>
           <div class="chips">${streaming.map((l) => `<button class="chip ext" data-nav data-ext="${esc(l.url)}" style="--dot:${esc(l.color || '#4aa8ff')}"><i></i>${esc(l.site)}</button>`).join('')}</div></div>` : ''}
+        <div class="d-section"><h2 class="section">Your sources</h2>
+          ${getSources().length
+            ? `<div class="chips">${getSources().map((src) => `<button class="chip ext" data-nav data-ext="${esc(sourceURL(src, m))}"><i></i>${esc(src.name)}</button>`).join('')}</div>`
+            : `<div class="d-sub">Add your own sites in <button class="link-btn inline" data-nav data-go="settings">Settings → Sources</button> to open this anime on them in one click.</div>`}
+        </div>
         <div class="d-section"><h2 class="section">Episodes</h2>
           <div class="d-sub">${lib ? `${lib.files.length} on disk. ` : ''}Episodes without a linked file open on an official site when one is available.</div>
           <div id="ep-area">${episodesHTML(m)}</div></div>
@@ -835,6 +859,16 @@ document.addEventListener('click', async (e) => {
 
   switch (action) {
     case 'list-menu': openListMenu(m, t); return;
+    case 'src-add': {
+      const name = $('#src-name').value.trim(), url = $('#src-url').value.trim();
+      if (!name || !/^https?:\/\/\S+$/i.test(url)) { toast('Enter a name and a link that starts with http:// or https://'); return; }
+      store.set('sources', [...getSources(), { name, url }]);
+      toast(`Added ${name}`); render({ keepScroll: true }); return;
+    }
+    case 'src-del': {
+      const list = getSources(); const [gone] = list.splice(Number(t.dataset.idx), 1);
+      store.set('sources', list); toast(`Removed ${gone?.name || 'source'}`); render({ keepScroll: true }); return;
+    }
     case 'list-tab': state.stack[state.stack.length - 1].params = { status: t.dataset.status }; render(); return;
     case 'al-login': alLogin(); return;
     case 'al-logout': alLogout(); return;
