@@ -238,10 +238,12 @@ const VIEWS = {
         ${rail('Top rated', d.top.media.map((m) => cardHTML(m)).join(''))}
         ${rail('All-time popular', d.popular.media.map((m) => cardHTML(m)).join(''))}`,
       after() {
+        bindHero();
         state.heroTimer = setInterval(() => {
           const hero = $('#hero');
           if (!hero || hero.contains(document.activeElement) || state.heroes.length < 2) return;
-          setHero((state.heroIndex + 1) % state.heroes.length);
+          if (Date.now() - (state.heroTouched || 0) < 9000) return; // user just swiped
+          setHero((state.heroIndex + 1) % state.heroes.length, 1);
         }, 9000);
       }
     };
@@ -469,7 +471,7 @@ function heroHTML(m) {
   const desc = cleanDesc(m.description);
   const meta = [(m.genres || []).slice(0, 3).join(', '), m.averageScore ? `<b>★ ${(m.averageScore / 10).toFixed(1)}</b>` : ''].filter(Boolean).join('  •  ');
   const now = m.status === 'RELEASING' ? 'Now airing' : [FORMAT[m.format], m.seasonYear].filter(Boolean).join(', ');
-  return `<img class="hero-bg" src="${esc(m.bannerImage)}" alt="">
+  return `<img class="hero-bg" draggable="false" src="${esc(m.bannerImage)}" alt="">
     <div class="hero-body">
       <h1>${esc(titleOf(m))}</h1>
       <div class="meta">${meta}</div>
@@ -483,10 +485,48 @@ function heroHTML(m) {
     </div>
     <div class="hero-dots">${state.heroes.map((_, i) => `<button class="${i === state.heroIndex ? 'on' : ''}" data-hero="${i}" tabindex="-1" aria-label="Slide ${i + 1}"></button>`).join('')}</div>`;
 }
-function setHero(i) {
+function setHero(i, dir = 0) {
   state.heroIndex = i;
   const hero = $('#hero');
-  if (hero) hero.innerHTML = heroHTML(state.heroes[i]);
+  if (!hero) return;
+  hero.innerHTML = heroHTML(state.heroes[i]);
+  hero.classList.remove('from-left', 'from-right');
+  if (dir) { void hero.offsetWidth; hero.classList.add(dir > 0 ? 'from-right' : 'from-left'); }
+}
+
+// Click the banner to open the anime; drag it left/right to switch to the next/previous one
+function bindHero() {
+  const hero = $('#hero');
+  if (!hero) return;
+  let startX = null, dx = 0;
+  const reset = () => { startX = null; hero.classList.remove('dragging'); hero.style.setProperty('--drag', '0px'); };
+  hero.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0 || e.target.closest('button')) return;
+    startX = e.clientX; dx = 0;
+    hero.setPointerCapture(e.pointerId);
+    hero.classList.add('dragging');
+  });
+  hero.addEventListener('pointermove', (e) => {
+    if (startX == null) return;
+    dx = e.clientX - startX;
+    hero.style.setProperty('--drag', `${dx * 0.6}px`);
+  });
+  hero.addEventListener('pointerup', () => {
+    if (startX == null) return;
+    const moved = dx;
+    reset();
+    const n = state.heroes.length;
+    if (Math.abs(moved) > 60 && n > 1) {
+      state.heroTouched = Date.now();
+      const dir = moved < 0 ? 1 : -1; // drag left = next, drag right = previous
+      setHero((state.heroIndex + dir + n) % n, dir);
+    } else if (Math.abs(moved) < 8) {
+      const m = state.heroes[state.heroIndex];
+      if (m) go('detail', { id: m.id });
+    }
+  });
+  hero.addEventListener('pointercancel', reset);
+  hero.addEventListener('dragstart', (e) => e.preventDefault());
 }
 
 /* ---------- Episodes on detail page ---------- */
@@ -593,7 +633,11 @@ document.addEventListener('click', async (e) => {
     go(v, v === 'movies' ? { tab: 'movies' } : {});
     return;
   }
-  if (t.dataset.hero != null) { setHero(Number(t.dataset.hero)); return; }
+  if (t.dataset.hero != null) {
+    const i = Number(t.dataset.hero);
+    state.heroTouched = Date.now();
+    setHero(i, i > state.heroIndex ? 1 : -1); return;
+  }
   if (t.dataset.ext) { openExternal(t.dataset.ext); return; }
 
   const action = t.dataset.action;
@@ -820,6 +864,7 @@ async function loadEpisode(ep) {
     return;
   }
   video.src = f.url;
+  setPreviewSource(f.url);
   video.play().catch(() => {});
   if (f.sub && bridge) {
     const s = await bridge.readSubtitle(f.sub);
@@ -834,6 +879,7 @@ function closePlayer() {
   video.pause();
   video.removeAttribute('src');
   video.load();
+  setPreviewSource('');
   if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
   player.hidden = true;
   player.classList.remove('idle', 'playing');
@@ -894,9 +940,9 @@ function seek(delta, side = '') {
   flash(delta < 0 ? `⟲  ${Math.abs(delta)}s` : `${delta}s  ⟳`, side);
   updateProgress();
 }
-function togglePlay() {
+function togglePlay(silent = false) {
   if (!video.src) return;
-  if (video.paused) { video.play().catch(() => {}); flash('▶'); } else { video.pause(); flash('❚❚'); }
+  if (video.paused) { video.play().catch(() => {}); if (!silent) flash('▶'); } else { video.pause(); if (!silent) flash('❚❚'); }
 }
 function setVolume(v) {
   video.volume = Math.max(0, Math.min(1, Math.round(v * 20) / 20));
@@ -1037,11 +1083,38 @@ pbar.addEventListener('pointerdown', (e) => {
 });
 pbar.addEventListener('pointermove', (e) => {
   const ratio = ratioAt(e);
-  const tip = $('#pbar-tip');
-  tip.style.left = ratio * 100 + '%';
-  tip.textContent = fmtTime(ratio * (video.duration || 0));
-  if (P.dragging && video.duration) { video.currentTime = ratio * video.duration; updateProgress(); }
+  const t = ratio * (video.duration || 0);
+  const w = pbar.clientWidth, half = 100;
+  $('#pbar-tip').style.left = Math.max(half, Math.min(w - half, ratio * w)) + 'px';
+  $('#pbar-time').textContent = fmtTime(t);
+  requestPreview(t);
+  if (P.dragging && video.duration) { video.currentTime = t; updateProgress(); }
 });
+
+/* Hover preview: a second, muted copy of the video that jumps to the hovered time */
+const pv = $('#pv');
+let pvBusy = false, pvWant = null;
+function setPreviewSource(url) {
+  pvBusy = false; pvWant = null;
+  pv.classList.add('off');
+  if (url) pv.src = url; else { pv.removeAttribute('src'); pv.load(); }
+}
+function requestPreview(t) {
+  pvWant = t;
+  if (!pvBusy) pvSeek();
+}
+function pvSeek() {
+  if (pvWant == null || !pv.getAttribute('src') || pv.readyState < 1) return;
+  pvBusy = true;
+  pv.currentTime = pvWant; pvWant = null;
+}
+pv.addEventListener('loadedmetadata', pvSeek);
+pv.addEventListener('seeked', () => {
+  pvBusy = false;
+  pv.classList.remove('off');
+  if (pvWant != null) pvSeek();
+});
+pv.addEventListener('error', () => { pvBusy = false; pv.classList.add('off'); });
 pbar.addEventListener('pointerup', () => { P.dragging = false; });
 
 /* Video events */
@@ -1068,17 +1141,21 @@ video.addEventListener('error', () => {
   showMsg('This file can\'t be played.\nThe app plays MP4 and WebM, and MKV files encoded with H.264.\nFiles using HEVC (x265) or AC3/DTS audio may need converting to MP4 first.');
 });
 // Single click = play/pause. Double-click: left third = back, right third = forward, middle = fullscreen.
-let clickTimer = null;
+// Uses the click count from Windows, so it follows your system double-click speed.
+let clickTimer = null, toggledAt = 0;
 video.addEventListener('click', (e) => {
-  if (clickTimer) {
+  if (e.detail >= 2) {
     clearTimeout(clickTimer); clickTimer = null;
+    // a slow double-click may already have toggled play/pause once — undo that
+    if (Date.now() - toggledAt < 700) { togglePlay(true); toggledAt = 0; }
     const r = video.getBoundingClientRect(), x = (e.clientX - r.left) / r.width;
     if (x < 0.35) seek(-getSkip(), 'left');
     else if (x > 0.65) seek(getSkip(), 'right');
-    else toggleFullscreen();
+    else if (e.detail === 2) toggleFullscreen();
     return;
   }
-  clickTimer = setTimeout(() => { clickTimer = null; togglePlay(); }, 260);
+  clearTimeout(clickTimer);
+  clickTimer = setTimeout(() => { clickTimer = null; toggledAt = Date.now(); togglePlay(); }, 250);
 });
 
 /* Player buttons — keep focus on the player so keys keep working */
