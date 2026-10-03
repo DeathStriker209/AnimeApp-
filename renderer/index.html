@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta http-equiv="Content-Security-Policy"
-        content="default-src 'self'; img-src 'self' https: data: blob:; media-src 'self' file: blob:; connect-src https://graphql.anilist.co https://www.googleapis.com; frame-src https://www.youtube.com https://www.youtube-nocookie.com; style-src 'self' 'unsafe-inline'; script-src 'self'">
+        content="default-src 'self'; img-src 'self' https: data: blob:; media-src 'self' file: blob:; connect-src https://graphql.anilist.co; style-src 'self' 'unsafe-inline'; script-src 'self'">
   <title>Anime Stream+</title>
   <link rel="stylesheet" href="styles.css">
 </head>
@@ -103,32 +103,7 @@
     </div>
   </section>
 
-  <!-- YouTube player overlay (free official episodes) -->
-  <section id="ytplayer" hidden tabindex="-1">
-    <div class="p-top">
-      <div class="logo small">ANIME<span>STREAM+</span></div>
-      <div class="p-title">
-        <div><b>Now playing:</b> <span id="yt-name"></span></div>
-        <small id="yt-sub"></small>
-      </div>
-      <span class="clock" id="yt-clock">--:--</span>
-      <button class="icon-btn" id="yt-ext" tabindex="-1" title="Open on YouTube">
-        <svg viewBox="0 0 24 24"><path d="M14 4h6v6M20 4l-9 9M18 14v6H4V6h6"/></svg></button>
-      <button class="icon-btn" id="yt-close" tabindex="-1" title="Close (Esc)">
-        <svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></svg></button>
-    </div>
-    <div class="p-body">
-      <div class="p-stage">
-        <iframe id="yt-frame" title="YouTube video" allow="autoplay; encrypted-media; picture-in-picture; fullscreen"
-                referrerpolicy="strict-origin-when-cross-origin"></iframe>
-      </div>
-      <aside class="p-list">
-        <h3>Episode list</h3>
-        <div class="p-eps" id="yt-eps"></div>
-      </aside>
-    </div>
-  </section>
-
+  <div class="modal" id="modal" hidden></div>
   <div class="toast" id="toast" role="status" hidden></div>
 
   <script src="app.js"></script>

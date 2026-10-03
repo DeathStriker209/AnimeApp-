@@ -44,7 +44,13 @@ const clock12 = (d) => d.toLocaleTimeString('en-US', { hour: 'numeric', minute: 
 const getProfile = () => store.get('profile', { name: '' });
 const initial = (name) => (name || 'U').trim().charAt(0).toUpperCase() || 'U';
 const getSkip = () => { const n = Number(store.get('skip', 10)); return [5, 10, 15, 20].includes(n) ? n : 10; };
-function updateAvatar() { const a = $('#avatar'); if (a) { a.textContent = initial(getProfile().name); a.title = getProfile().name || 'Settings'; } }
+function updateAvatar() {
+  const a = $('#avatar');
+  if (!a) return;
+  const v = AL.viewer;
+  if (v?.avatar) { a.innerHTML = `<img src="${esc(v.avatar)}" alt="">`; a.title = `${v.name} (AniList)`; }
+  else { a.textContent = initial(getProfile().name); a.title = getProfile().name || 'Settings'; }
+}
 
 let toastTimer;
 function toast(msg) {
@@ -67,22 +73,26 @@ const CARD = `fragment card on Media {
 }`;
 const gqlCache = new Map();
 
-async function gql(query, variables = {}) {
+async function gql(query, variables = {}, { auth = false, fresh = false } = {}) {
   const key = query + JSON.stringify(variables);
-  if (gqlCache.has(key)) return gqlCache.get(key);
+  if (!fresh && !auth && gqlCache.has(key)) return gqlCache.get(key);
+  const headers = { 'Content-Type': 'application/json', Accept: 'application/json' };
+  if (auth && AL.token) headers.Authorization = `Bearer ${AL.token}`;
   for (let attempt = 0; attempt < 3; attempt++) {
-    const res = await fetch(API_URL, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-      body: JSON.stringify({ query, variables })
-    });
+    const res = await fetch(API_URL, { method: 'POST', headers, body: JSON.stringify({ query, variables }) });
+    if (auth && (res.status === 401 || res.status === 400)) {
+      const j = await res.json().catch(() => ({}));
+      const msg = j.errors?.[0]?.message || '';
+      if (res.status === 401 || /invalid token|unauthorized/i.test(msg)) { alLogout(true); throw new Error('Your AniList login expired. Log in again in Settings.'); }
+      throw new Error(msg || 'AniList request failed.');
+    }
     if (res.status === 429) {
       await sleep((Number(res.headers.get('Retry-After')) || 5) * 1000);
       continue;
     }
     const json = await res.json();
     if (json.errors?.length) throw new Error(json.errors[0].message);
-    gqlCache.set(key, json.data);
+    if (!auth) gqlCache.set(key, json.data);
     return json.data;
   }
   throw new Error('AniList is rate limiting requests. Wait a minute and try again.');
@@ -94,14 +104,134 @@ const remember = (list) => { (list || []).forEach((m) => m && mediaById.set(m.id
 /* =========================================================
    Persistent user data
    ========================================================= */
-const getList = () => store.get('mylist', {});
-const inList = (id) => !!getList()[id];
-function toggleList(m) {
-  const l = getList();
-  if (l[m.id]) { delete l[m.id]; toast(`Removed ${titleOf(m)} from My List`); }
-  else { l[m.id] = { ...snap(m), added: Date.now() }; toast(`Added ${titleOf(m)} to My List`); }
-  store.set('mylist', l);
+const LIST_STATUSES = [['CURRENT', 'Watching'], ['PLANNING', 'Planning'], ['COMPLETED', 'Completed'], ['PAUSED', 'Paused'], ['DROPPED', 'Dropped']];
+const statusLabel = (s) => (s === 'REPEATING' ? 'Rewatching' : (LIST_STATUSES.find((x) => x[0] === s) || [0, 'In list'])[1]);
+const listTab = (s) => (s === 'REPEATING' ? 'CURRENT' : s);
+const getList = () => store.get('mylist', {}); // used when not logged in to AniList
+
+/* ---------- AniList account ---------- */
+const AL = { token: store.get('al_token', ''), viewer: store.get('al_viewer', null), entries: new Map(), loaded: false, loading: null };
+
+async function alInit() {
+  if (!AL.token) return;
+  try {
+    const d = await gql(`query { Viewer { id name avatar { large } siteUrl } }`, {}, { auth: true });
+    AL.viewer = { id: d.Viewer.id, name: d.Viewer.name, avatar: d.Viewer.avatar?.large, url: d.Viewer.siteUrl };
+    store.set('al_viewer', AL.viewer);
+    updateAvatar();
+    await alLoadList(true);
+  } catch (err) { console.warn(err); }
 }
+
+function alLoadList(force = false) {
+  if (!AL.token || !AL.viewer) return Promise.resolve();
+  if (AL.loaded && !force) return Promise.resolve();
+  if (AL.loading) return AL.loading;
+  AL.loading = (async () => {
+    const d = await gql(`query($u: Int) { MediaListCollection(userId: $u, type: ANIME) { lists { entries {
+        id status progress score(format: POINT_10) updatedAt media { ...card } } } } } ${CARD}`,
+      { u: AL.viewer.id }, { auth: true });
+    AL.entries.clear();
+    for (const l of d.MediaListCollection.lists || []) {
+      for (const e of l.entries || []) {
+        if (!AL.entries.has(e.media.id)) AL.entries.set(e.media.id, { id: e.id, status: e.status, progress: e.progress, score: e.score, updatedAt: e.updatedAt, media: e.media });
+      }
+    }
+    remember([...AL.entries.values()].map((e) => e.media));
+    AL.loaded = true;
+  })().finally(() => { AL.loading = null; });
+  return AL.loading;
+}
+
+async function alLogin() {
+  if (!bridge?.anilistLogin) { toast('Logging in works in the desktop app.'); return; }
+  const clientId = ($('#al-client')?.value || store.get('al_client', '')).trim();
+  store.set('al_client', clientId);
+  const r = await bridge.anilistLogin(clientId);
+  if (r?.error) { toast(r.error); return; }
+  if (r?.token) await alSetToken(r.token);
+}
+async function alSetToken(token) {
+  AL.token = token.trim(); store.set('al_token', AL.token);
+  AL.viewer = null; AL.loaded = false;
+  await alInit();
+  if (AL.viewer) toast(`Logged in as ${AL.viewer.name}. Your lists are synced.`);
+  else { toast('That login didn’t work. Check your client ID and try again.'); alLogout(true); }
+  render({ keepScroll: true });
+}
+function alLogout(silent = false) {
+  AL.token = ''; AL.viewer = null; AL.entries.clear(); AL.loaded = false;
+  store.set('al_token', ''); store.set('al_viewer', null);
+  updateAvatar();
+  if (!silent) { toast('Logged out of AniList'); render({ keepScroll: true }); }
+}
+
+/* ---------- Which list an anime is in ---------- */
+function listEntry(id) {
+  if (AL.token && AL.viewer) return AL.entries.get(id) || null;
+  const e = getList()[id];
+  return e ? { status: e.status || 'PLANNING', progress: 0, media: e, updatedAt: (e.added || 0) / 1000 } : null;
+}
+const listBtnLabel = (id) => { const e = listEntry(id); return e ? `✓ ${statusLabel(e.status)}` : '+ Add to My List'; };
+
+async function setListStatus(m, status) {
+  if (AL.token && AL.viewer) {
+    if (status) {
+      const d = await gql(`mutation($m: Int, $s: MediaListStatus) { SaveMediaListEntry(mediaId: $m, status: $s) { id status progress score(format: POINT_10) updatedAt } }`,
+        { m: m.id, s: status }, { auth: true });
+      const e = d.SaveMediaListEntry;
+      AL.entries.set(m.id, { id: e.id, status: e.status, progress: e.progress, score: e.score, updatedAt: e.updatedAt, media: { ...snap(m) } });
+    } else {
+      const cur = AL.entries.get(m.id);
+      if (cur) await gql(`mutation($id: Int) { DeleteMediaListEntry(id: $id) { deleted } }`, { id: cur.id }, { auth: true });
+      AL.entries.delete(m.id);
+    }
+  } else {
+    const l = getList();
+    if (status) l[m.id] = { ...snap(m), added: l[m.id]?.added || Date.now(), status };
+    else delete l[m.id];
+    store.set('mylist', l);
+  }
+  toast(status ? `Saved ${titleOf(m)} to ${statusLabel(status)}${AL.viewer ? ' on AniList' : ''}` : `Removed ${titleOf(m)} from My List`);
+  $$(`[data-action="list-menu"][data-id="${m.id}"]`).forEach((b) => { b.textContent = listBtnLabel(m.id); });
+  const top = state.stack[state.stack.length - 1];
+  if (top.view === 'mylist' || top.view === 'home') render({ keepScroll: true });
+}
+
+/* ---------- "Save to list" popup ---------- */
+const modal = $('#modal');
+const ICONS = { CURRENT: '▶', PLANNING: '🕒', COMPLETED: '✓', PAUSED: '❚❚', DROPPED: '✕' };
+function openListMenu(m, trigger) {
+  const cur = listEntry(m.id)?.status;
+  const curTab = cur && listTab(cur);
+  state.modal = { m, trigger };
+  modal.innerHTML = `<div class="modal-card" role="dialog" aria-modal="true" aria-label="Save to list">
+    <h3>Save to list</h3>
+    <div class="modal-sub">${esc(titleOf(m))}${AL.viewer ? ' · syncs to AniList' : ''}</div>
+    <div class="modal-opts">${LIST_STATUSES.map(([s, l]) => `<button class="modal-opt ${curTab === s ? 'on' : ''}" data-nav data-status="${s}">
+      <span class="mi">${ICONS[s]}</span>${l}${curTab === s ? '<span class="tick">Current</span>' : ''}</button>`).join('')}</div>
+    <div class="modal-foot">
+      ${cur ? `<button class="btn danger" data-nav data-status="">Remove from list</button>` : ''}
+      <button class="btn" data-nav data-close>Cancel</button>
+    </div></div>`;
+  modal.hidden = false;
+  ($('.modal-opt.on', modal) || $('.modal-opt', modal)).focus();
+}
+function closeModal() {
+  if (modal.hidden) return;
+  modal.hidden = true; modal.innerHTML = '';
+  state.modal?.trigger?.focus?.({ preventScroll: true });
+  state.modal = null;
+}
+modal.addEventListener('click', async (e) => {
+  if (e.target === modal || e.target.closest('[data-close]')) { closeModal(); return; }
+  const b = e.target.closest('[data-status]');
+  if (!b || !state.modal) return;
+  const { m } = state.modal;
+  $$('button', modal).forEach((x) => { x.disabled = true; });
+  try { await setListStatus(m, b.dataset.status || null); closeModal(); }
+  catch (err) { toast(err.message); $$('button', modal).forEach((x) => { x.disabled = false; }); }
+});
 const getHistory = () => store.get('history', {});
 const getLibrary = () => store.get('library', {});
 
@@ -223,6 +353,9 @@ const VIEWS = {
     state.heroIndex = 0;
 
     const history = Object.values(getHistory()).sort((a, b) => b.at - a.at);
+    await alLoadList().catch(() => {});
+    const alWatching = AL.viewer ? [...AL.entries.values()].filter((e) => e.status === 'CURRENT' || e.status === 'REPEATING')
+      .sort((a, b) => b.updatedAt - a.updatedAt) : [];
     const airing = d.season.media.map((m) => wideHTML({ media: m, label: [FORMAT[m.format], m.episodes ? `${m.episodes} eps` : 'Airing'].filter(Boolean).join(' / '), time: 0, dur: 0 })
       .replace('data-action="resume" ', '').replace('<div class="prog"><i style="width:0%"></i></div>', '')).join('');
 
@@ -230,6 +363,7 @@ const VIEWS = {
       html: `
         <div class="hero" id="hero">${heroHTML(state.heroes[0])}</div>
         ${history.length ? rail('Continue watching', history.map(wideHTML).join(''), 'wide-rail') : ''}
+        ${alWatching.length ? rail('Watching on AniList', alWatching.map((e) => cardHTML(e.media, { sub: `EP ${e.progress}${e.media.episodes ? ' / ' + e.media.episodes : ''}` })).join('')) : ''}
         ${rail('Airing this season', airing, 'wide-rail')}
         ${rail('Popular categories', CATEGORIES.slice(0, 24).map(genreTile).join(''), 'genres-rail')}
         ${rail('Trending now', trending.map((m) => cardHTML(m)).join(''))}
@@ -273,14 +407,35 @@ const VIEWS = {
     return VIEWS.browse({ format: 'MOVIE', title: 'Movies', tab: 'movies' });
   },
 
-  async mylist() {
-    const items = Object.values(getList()).sort((a, b) => b.added - a.added);
-    remember(items);
+  async mylist(params) {
+    const tab = params.status || 'ALL';
+    let all;
+    if (AL.token && AL.viewer) {
+      await alLoadList();
+      all = [...AL.entries.values()];
+    } else {
+      all = Object.values(getList()).map((x) => ({ status: x.status || 'PLANNING', progress: 0, media: x, updatedAt: (x.added || 0) / 1000 }));
+    }
+    remember(all.map((e) => e.media));
+    const count = (s) => all.filter((e) => listTab(e.status) === s).length;
+    const tabs = [['ALL', 'All', all.length], ...LIST_STATUSES.map(([s, l]) => [s, l, count(s)])];
+    // keep AniList's usual order: Watching, Completed, Paused, Dropped, Planning
+    const order = ['ALL', 'CURRENT', 'COMPLETED', 'PAUSED', 'DROPPED', 'PLANNING'];
+    tabs.sort((a, b) => order.indexOf(a[0]) - order.indexOf(b[0]));
+    const shown = all.filter((e) => tab === 'ALL' || listTab(e.status) === tab).sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+    const head = AL.viewer
+      ? `<div class="list-head"><img src="${esc(AL.viewer.avatar || '')}" alt=""><span>Synced with AniList as <b>${esc(AL.viewer.name)}</b></span>
+          <button class="btn small" data-nav data-action="al-refresh">Refresh</button></div>`
+      : `<div class="list-head"><span>Saved on this PC. <button class="link-btn inline" data-nav data-go="settings">Log in to AniList</button> to import your AniList lists.</span></div>`;
+    const sub = (e) => AL.viewer
+      ? `${statusLabel(e.status)} · ${e.progress || 0}/${e.media.episodes || '?'} eps${e.score ? ` · ★ ${e.score}` : ''}`
+      : statusLabel(e.status);
     return {
-      html: `<div class="page-title">My List</div>` + (items.length
-        ? `<div class="grid">${items.map((m) => cardHTML(m)).join('')}</div>`
-        : `<div class="empty"><h3>Your list is empty</h3>Open any anime and choose “Add to My List” to keep it here.
-             <div><button class="btn accent" data-nav data-go="browse">Browse anime</button></div></div>`)
+      html: `<div class="page-title">My List</div>${head}
+        <div class="chips list-tabs">${tabs.map(([s, l, n]) => `<button class="chip ${s === tab ? 'on' : ''}" data-nav ${s === tab ? 'data-autofocus' : ''} data-action="list-tab" data-status="${s}">${l} <span class="count">${n}</span></button>`).join('')}</div>
+        ${shown.length ? `<div class="grid">${shown.map((e) => cardHTML(e.media, { sub: sub(e) })).join('')}</div>`
+          : `<div class="empty"><h3>Nothing here yet</h3>Open any anime and press “Add to My List” to save it to a list.
+             <div><button class="btn accent" data-nav data-go="browse">Browse anime</button></div></div>`}`
     };
   },
 
@@ -300,7 +455,37 @@ const VIEWS = {
   async settings() {
     const prof = getProfile();
     const skip = getSkip();
-    const hist = Object.values(getHistory()).length, list = Object.keys(getList()).length, lib = Object.keys(getLibrary()).length;
+    const hist = Object.values(getHistory()).length, lib = Object.keys(getLibrary()).length;
+    const list = AL.viewer ? AL.entries.size : Object.keys(getList()).length;
+    const v = AL.viewer;
+    const alBlock = v
+      ? `<div class="settings-block"><h3>AniList account</h3>
+          <div class="profile-row"><img class="avatar big" src="${esc(v.avatar || '')}" alt="">
+            <div><div class="al-name">${esc(v.name)}</div><div class="d-sub" style="margin:4px 0 0">Your lists sync both ways with AniList.</div></div></div>
+          <div class="btn-row">
+            <button class="btn" data-nav data-go="mylist">Open My List</button>
+            <button class="btn" data-nav data-action="al-refresh">Refresh lists</button>
+            <button class="btn" data-nav data-ext="${esc(v.url || 'https://anilist.co')}">View AniList profile</button>
+            <button class="btn danger" data-nav data-action="al-logout">Log out</button>
+          </div></div>`
+      : `<div class="settings-block"><h3>AniList account</h3>
+          <p>Log in to import your Watching, Completed, Paused, Dropped and Planning lists, use your AniList profile picture,
+          and save anime to your AniList lists from the app.</p>
+          <p><b>One-time setup:</b> open AniList's developer page, click <i>Create New Client</i>, enter any name, and set the
+          Redirect URL to <code>https://anilist.co/api/v2/oauth/pin</code>. Then paste the <i>Client ID</i> number below.
+          <button class="link-btn inline" data-nav data-ext="https://anilist.co/settings/developer">Open developer page</button></p>
+          <div class="field-row">
+            <label class="field">Client ID <input id="al-client" type="text" data-nav inputmode="numeric" spellcheck="false" value="${esc(store.get('al_client', ''))}" placeholder="e.g. 12345"></label>
+            <button class="btn primary" data-nav data-action="al-login">Log in with AniList</button>
+          </div>
+          <details class="al-help"><summary data-nav tabindex="0">Login window didn't close by itself?</summary>
+            <p>After you approve, AniList shows a long token. Copy it and paste it here.</p>
+            <div class="field-row">
+              <label class="field">Token <input id="al-token" type="text" data-nav spellcheck="false" placeholder="Paste token"></label>
+              <button class="btn" data-nav data-action="al-token">Save token</button>
+            </div>
+          </details>
+        </div>`;
     const keys = [
       ['← ↑ → ↓', 'Move around the app'], ['Enter', 'Open / select'],
       ['Esc or Backspace or Alt+←', 'Go back a page'], ['Alt+→', 'Go forward a page'], ['/', 'Jump to search'],
@@ -311,24 +496,15 @@ const VIEWS = {
     ];
     return {
       html: `<div class="page-title">Settings</div>
-      <div class="settings-block"><h3>Profile</h3>
+      ${v ? '' : `<div class="settings-block"><h3>Profile</h3>
         <div class="profile-row">
           <div class="avatar big" id="avatar-big">${esc(initial(prof.name))}</div>
           <label class="field">Display name
-            <input id="pname" type="text" data-nav data-autofocus maxlength="24" value="${esc(prof.name)}" placeholder="Your name"></label>
-        </div>
-        <div class="stats"><div><b>${hist}</b>watching</div><div><b>${list}</b>in My List</div><div><b>${lib}</b>with files on disk</div></div>
-      </div>
-      <div class="settings-block"><h3>Free episodes on YouTube</h3>
-        <p>The app finds full episodes that official anime channels (like Muse Asia and Ani-One) upload for free, and plays them inside the app.
-        It needs a free YouTube API key from Google.
-        <button class="link-btn inline" data-nav data-ext="https://console.cloud.google.com/apis/library/youtube.googleapis.com">Get a key</button></p>
-        <div class="field-col">
-          <label class="field">YouTube API key
-            <input id="ytkey" class="wide-input" type="text" data-nav spellcheck="false" autocomplete="off" value="${esc(getYT().key)}" placeholder="Paste your key here"></label>
-          <label class="field">Official channels to check (separate with commas)
-            <input id="ytch" class="wide-input" type="text" data-nav spellcheck="false" value="${esc(getYT().channels)}"></label>
-        </div>
+            <input id="pname" type="text" data-nav maxlength="24" value="${esc(prof.name)}" placeholder="Your name"></label>
+        </div></div>`}
+      ${alBlock}
+      <div class="settings-block"><h3>Stats</h3>
+        <div class="stats"><div><b>${hist}</b>continue watching</div><div><b>${list}</b>in My List</div><div><b>${lib}</b>with files on disk</div></div>
       </div>
       <div class="settings-block"><h3>Skip forward and back</h3>
         <p>How far the skip buttons, arrow keys and double-click jump in the player.</p>
@@ -342,16 +518,15 @@ const VIEWS = {
       <div class="settings-block"><h3>Where info comes from</h3>
         <p>Titles, covers, schedules, descriptions and “Where to watch” links come from AniList. Episodes play from video files you link from your own computer.</p></div>
       <div class="settings-block"><h3>Your data</h3>
-        <p>Watch history, My List and linked files are stored on this computer only.</p>
+        <p>${v ? 'Watch history and linked files are stored on this computer. Your lists live on your AniList account.' : 'Watch history, My List and linked files are stored on this computer only.'}</p>
         <div class="btn-row">
           <button class="btn" data-nav data-action="clear-history">Clear watch history</button>
-          <button class="btn" data-nav data-action="clear-list">Clear My List</button>
+          ${v ? '' : '<button class="btn" data-nav data-action="clear-list">Clear My List</button>'}
           <button class="btn" data-nav data-action="clear-library">Unlink all files</button>
         </div></div>`,
       after() {
-        $('#ytkey').addEventListener('input', (e) => { store.set('youtube', { ...getYT(), key: e.target.value.trim() }); ytFound.clear(); });
-        $('#ytch').addEventListener('input', (e) => { store.set('youtube', { ...getYT(), channels: e.target.value }); ytFound.clear(); });
-        $('#pname').addEventListener('input', (e) => {
+        $('#al-client')?.addEventListener('input', (e) => store.set('al_client', e.target.value.trim()));
+        $('#pname')?.addEventListener('input', (e) => {
           const name = e.target.value.trim();
           store.set('profile', { ...getProfile(), name });
           $('#avatar-big').textContent = initial(name);
@@ -451,7 +626,7 @@ const VIEWS = {
               ${playBtn}
               <button class="btn ${lib ? '' : 'primary'}" data-nav ${lib ? '' : 'data-autofocus'} data-action="link" data-id="${m.id}">
                 <svg viewBox="0 0 24 24"><path d="M4 7h6l2 2h8v10H4z"/></svg>${lib ? 'Add more files' : 'Link episode files'}</button>
-              <button class="btn" data-nav data-action="toggle-list" data-id="${m.id}">${inList(m.id) ? '✓ In My List' : '+ Add to My List'}</button>
+              <button class="btn" data-nav data-action="list-menu" data-id="${m.id}">${listBtnLabel(m.id)}</button>
               ${m.trailer?.site === 'youtube' ? `<button class="btn" data-nav data-ext="https://www.youtube.com/watch?v=${esc(m.trailer.id)}">Watch trailer</button>` : ''}
               ${lib ? `<button class="btn" data-nav data-action="unlink" data-id="${m.id}">Unlink files</button>` : ''}
             </div>
@@ -459,13 +634,11 @@ const VIEWS = {
         </div>
         ${streaming.length ? `<div class="d-section"><h2 class="section">Where to watch</h2>
           <div class="chips">${streaming.map((l) => `<button class="chip ext" data-nav data-ext="${esc(l.url)}" style="--dot:${esc(l.color || '#4aa8ff')}"><i></i>${esc(l.site)}</button>`).join('')}</div></div>` : ''}
-        <div class="d-section"><h2 class="section">Watch free on YouTube</h2><div id="yt-area"></div></div>
-        <div class="d-section"><h2 class="section">Episodes on your PC</h2>
+        <div class="d-section"><h2 class="section">Episodes</h2>
           <div class="d-sub">${lib ? `${lib.files.length} on disk. ` : ''}Episodes without a linked file open on an official site when one is available.</div>
           <div id="ep-area">${episodesHTML(m)}</div></div>
         ${recs.length ? `<div class="d-section">${rail('You might also like', recs.map((r) => cardHTML(r)).join(''))}</div>` : ''}
-      </div>`,
-      after() { loadYTSection(m); }
+      </div>`
     };
   }
 };
@@ -496,7 +669,7 @@ function heroHTML(m) {
       <div class="btn-row">
         <button class="btn primary" data-nav data-autofocus data-id="${m.id}">
           <svg viewBox="0 0 24 24"><path d="M7 4v16l13-8z" fill="currentColor"/></svg>View details</button>
-        <button class="btn" data-nav data-action="toggle-list" data-id="${m.id}">${inList(m.id) ? '✓ In My List' : '+ Add to My List'}</button>
+        <button class="btn" data-nav data-action="list-menu" data-id="${m.id}">${listBtnLabel(m.id)}</button>
       </div>
     </div>
     <div class="hero-dots">${state.heroes.map((_, i) => `<button class="${i === state.heroIndex ? 'on' : ''}" data-hero="${i}" tabindex="-1" aria-label="Slide ${i + 1}"></button>`).join('')}</div>`;
@@ -640,7 +813,7 @@ async function linkFiles(m) {
    Click handling (mouse and Enter key)
    ========================================================= */
 document.addEventListener('click', async (e) => {
-  if (e.target.closest('#player') || e.target.closest('#ytplayer')) return;
+  if (e.target.closest('#player') || e.target.closest('#modal')) return;
   const t = e.target.closest('[data-go],[data-action],[data-ext],[data-ep],[data-genre],[data-tag],[data-hero],[data-id]');
   if (!t) return;
 
@@ -661,9 +834,15 @@ document.addEventListener('click', async (e) => {
   const m = mediaById.get(id) || state.detail;
 
   switch (action) {
-    case 'toggle-list':
-      toggleList(m);
-      t.textContent = inList(m.id) ? '✓ In My List' : '+ Add to My List';
+    case 'list-menu': openListMenu(m, t); return;
+    case 'list-tab': state.stack[state.stack.length - 1].params = { status: t.dataset.status }; render(); return;
+    case 'al-login': alLogin(); return;
+    case 'al-logout': alLogout(); return;
+    case 'al-token': { const v = $('#al-token')?.value.trim(); if (v) alSetToken(v); else toast('Paste the token first.'); return; }
+    case 'al-refresh':
+      t.disabled = true;
+      try { await alLoadList(true); toast('Lists refreshed'); render({ keepScroll: true }); }
+      catch (err) { toast(err.message); t.disabled = false; }
       return;
     case 'link': linkFiles(m); return;
     case 'unlink': {
@@ -700,8 +879,6 @@ document.addEventListener('click', async (e) => {
       return;
     }
     case 'reload': gqlCache.clear(); render(); return;
-    case 'ytpl': showYTPlaylist(Number(t.dataset.idx)); return;
-    case 'ytplay': openYT(Number(t.dataset.idx)); return;
     case 'day': state.stack[state.stack.length - 1].params = { day: Number(t.dataset.day) }; render(); return;
     case 'set-skip':
       store.set('skip', Number(t.dataset.skip)); updateSkipUI();
@@ -749,7 +926,8 @@ $('#search').addEventListener('input', (e) => {
    Spatial keyboard navigation
    ========================================================= */
 function navigables() {
-  return $$('[data-nav]').filter((el) => !el.closest('#player') && !el.closest('#ytplayer') && el.offsetParent !== null && !el.disabled);
+  const scope = modal.hidden ? document : modal;
+  return $$('[data-nav]', scope).filter((el) => !el.closest('#player') && el.offsetParent !== null && !el.disabled);
 }
 
 function moveFocus(dir) {
@@ -801,12 +979,16 @@ document.addEventListener('keydown', (e) => {
   document.body.classList.add('kbd');
   if (e.altKey && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
     e.preventDefault();
-    if (e.key === 'ArrowLeft') { if (YTP.open) closeYT(); else if (P.open) closePlayer(); else back(); }
-    else if (!P.open && !YTP.open) forward();
+    if (e.key === 'ArrowLeft') { if (P.open) closePlayer(); else back(); }
+    else if (!P.open) forward();
     return;
   }
-  if (YTP.open) { ytKey(e); return; }
   if (P.open) { playerKey(e); return; }
+  if (!modal.hidden) {
+    if (e.key === 'Escape' || e.key === 'Backspace') { e.preventDefault(); closeModal(); }
+    else if (ARROWS[e.key]) { e.preventDefault(); moveFocus(ARROWS[e.key]); }
+    return;
+  }
   const t = e.target;
   const typing = t.matches?.('input[type="search"], input[type="text"], textarea');
 
@@ -835,8 +1017,8 @@ document.addEventListener('mousedown', () => document.body.classList.remove('kbd
 // Mouse side buttons: 3 = back, 4 = forward
 window.addEventListener('mousedown', (e) => { if (e.button === 3 || e.button === 4) e.preventDefault(); });
 window.addEventListener('mouseup', (e) => {
-  if (e.button === 3) { e.preventDefault(); if (YTP.open) closeYT(); else if (P.open) closePlayer(); else back(); }
-  if (e.button === 4) { e.preventDefault(); if (!P.open && !YTP.open) forward(); }
+  if (e.button === 3) { e.preventDefault(); if (!modal.hidden) closeModal(); else if (P.open) closePlayer(); else back(); }
+  if (e.button === 4) { e.preventDefault(); if (!P.open) forward(); }
 });
 
 /* =========================================================
@@ -1203,245 +1385,16 @@ $('#p-eps').addEventListener('click', (e) => {
 });
 
 /* =========================================================
-   Free official episodes on YouTube
-   ========================================================= */
-const YT_API = 'https://www.googleapis.com/youtube/v3/';
-const DEFAULT_CHANNELS = '@MuseAsia, @AniOneAsia, @GundamInfo';
-const getYT = () => ({ key: '', channels: DEFAULT_CHANNELS, ...store.get('youtube', {}) });
-const ytChannels = () => getYT().channels.split(/[\s,]+/).map((h) => h.trim()).filter(Boolean).map((h) => (h.startsWith('@') ? h : '@' + h));
-const ytFound = new Map();   // anime id -> matching playlists
-const ytVideos = new Map();  // playlist id -> videos
-
-async function yt(endpoint, params) {
-  const key = getYT().key;
-  if (!key) throw new Error('Add your YouTube API key in Settings first.');
-  const res = await fetch(YT_API + endpoint + '?' + new URLSearchParams({ ...params, key }));
-  const json = await res.json().catch(() => ({}));
-  if (json.error) {
-    const reason = json.error.errors?.[0]?.reason || '';
-    if (reason === 'quotaExceeded') throw new Error('YouTube’s free daily limit is used up. It resets tomorrow.');
-    if (/key/i.test(reason) || /API key/i.test(json.error.message || '')) throw new Error('Your YouTube API key isn’t working. Check it in Settings.');
-    if (reason === 'accessNotConfigured') throw new Error('Turn on “YouTube Data API v3” for your key in Google Cloud.');
-    throw new Error(json.error.message || 'YouTube request failed.');
-  }
-  return json;
-}
-
-// All playlists of an official channel (cached for a day to save your daily limit)
-async function channelPlaylists(handle) {
-  const cache = store.get('ytcache', {});
-  const k = handle.toLowerCase();
-  if (cache[k] && Date.now() - cache[k].at < 86400000) return cache[k];
-  const ch = await yt('channels', { part: 'snippet', forHandle: handle });
-  const item = ch.items?.[0];
-  const entry = { at: Date.now(), title: item?.snippet?.title || handle, playlists: [] };
-  if (item) {
-    let pageToken = '';
-    for (let i = 0; i < 25; i++) {
-      const p = await yt('playlists', { part: 'snippet,contentDetails', channelId: item.id, maxResults: 50, ...(pageToken ? { pageToken } : {}) });
-      for (const pl of p.items || []) entry.playlists.push({ id: pl.id, title: pl.snippet.title, count: pl.contentDetails.itemCount });
-      pageToken = p.nextPageToken;
-      if (!pageToken) break;
-    }
-  }
-  cache[k] = entry;
-  store.set('ytcache', cache);
-  return entry;
-}
-
-const normT = (s) => (s || '').toLowerCase().normalize('NFKD').replace(/[\u0300-\u036f]/g, '').replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
-const STOPWORDS = new Set(['the', 'a', 'an', 'of', 'no', 'to', 'wa', 'ga', 'wo', 'and', 'in', 'season', 'part', 'tv', 'anime']);
-const seasonOf = (t) => { const x = t.match(/\bseason (\d+)\b|\b(\d+)(?:st|nd|rd|th) season\b|\bs(\d+)\b/); return x ? Number(x[1] || x[2] || x[3]) : null; };
-
-function matchScore(playlistTitle, names) {
-  const pt = normT(playlistTitle), ptTok = new Set(pt.split(' '));
-  let best = 0;
-  for (const raw of names) {
-    const n = normT(raw);
-    if (n.length < 2) continue;
-    let sc;
-    if ((' ' + pt + ' ').includes(' ' + n + ' ')) sc = 1;
-    else {
-      const toks = n.split(' ').filter((t) => t.length > 1 && !STOPWORDS.has(t));
-      if (!toks.length) continue;
-      sc = (toks.filter((t) => ptTok.has(t)).length / toks.length) * 0.9;
-    }
-    const sp = seasonOf(pt), sn = seasonOf(n);
-    if (sp && sp > 1 && sp !== sn) sc -= 0.35;               // playlist is a different season
-    if (/\b(trailer|pv|teaser|clips?|opening|ending|preview|promo|shorts|music|ost)\b/.test(pt)) sc -= 0.5;
-    best = Math.max(best, sc);
-  }
-  return best;
-}
-
-async function findYouTube(m) {
-  if (ytFound.has(m.id)) return ytFound.get(m.id);
-  const names = [m.title?.english, m.title?.romaji, ...(m.synonyms || []).filter((x) => /^[\x00-\x7F]+$/.test(x))].filter(Boolean);
-  const results = await Promise.allSettled(ytChannels().map(channelPlaylists));
-  const firstError = results.find((r) => r.status === 'rejected');
-  const found = [];
-  for (const r of results) {
-    if (r.status !== 'fulfilled') continue;
-    for (const pl of r.value.playlists) {
-      if (!pl.count) continue;
-      const score = matchScore(pl.title, names);
-      if (score >= 0.75) found.push({ ...pl, channel: r.value.title, score });
-    }
-  }
-  if (!found.length && firstError) throw firstError.reason;
-  found.sort((a, b) => b.score - a.score || b.count - a.count);
-  const top = found.slice(0, 6);
-  ytFound.set(m.id, top);
-  return top;
-}
-
-async function playlistVideos(plId) {
-  if (ytVideos.has(plId)) return ytVideos.get(plId);
-  const list = [];
-  let pageToken = '';
-  for (let i = 0; i < 6; i++) {
-    const p = await yt('playlistItems', { part: 'snippet,status', playlistId: plId, maxResults: 50, ...(pageToken ? { pageToken } : {}) });
-    for (const it of p.items || []) {
-      const sn = it.snippet;
-      if (it.status?.privacyStatus && it.status.privacyStatus !== 'public' && it.status.privacyStatus !== 'unlisted') continue;
-      if (/^(private|deleted) video$/i.test(sn.title)) continue;
-      const ep = Number(sn.title.match(/(?:\bep(?:isode)?\.?\s*|#)(\d{1,4})\b/i)?.[1]) || null;
-      list.push({ id: sn.resourceId.videoId, title: sn.title, thumb: sn.thumbnails?.medium?.url || sn.thumbnails?.default?.url || '', ep });
-    }
-    pageToken = p.nextPageToken;
-    if (!pageToken) break;
-  }
-  // Put episodes in order when every title has an episode number
-  if (list.length && list.every((v) => v.ep)) list.sort((a, b) => a.ep - b.ep);
-  list.forEach((v, i) => { if (!v.ep) v.ep = i + 1; });
-  ytVideos.set(plId, list);
-  return list;
-}
-
-async function loadYTSection(m) {
-  const area = $('#yt-area');
-  if (!area) return;
-  if (!getYT().key) {
-    area.innerHTML = `<div class="yt-note">Find free full episodes from official channels like Muse Asia and Ani-One and play them right here.
-      It needs a free YouTube API key.<div><button class="btn" data-nav data-go="settings">Add key in Settings</button></div></div>`;
-    return;
-  }
-  area.innerHTML = `<div class="d-sub">Checking official channels…</div>`;
-  try {
-    const found = await findYouTube(m);
-    if (state.detail?.id !== m.id) return;
-    if (!found.length) {
-      area.innerHTML = `<div class="yt-note">No free official episodes found on ${esc(ytChannels().join(', '))}. Availability depends on your country.
-        <div><button class="btn" data-nav data-ext="https://www.youtube.com/results?search_query=${encodeURIComponent(titleOf(m) + ' episode 1 official')}">Search YouTube</button></div></div>`;
-      return;
-    }
-    state.yt = { media: m, found, sel: 0, videos: [] };
-    const last = store.get('ytlast', {})[m.id];
-    const idx = last ? Math.max(0, found.findIndex((f) => f.id === last.pl)) : 0;
-    await showYTPlaylist(idx);
-  } catch (err) {
-    if (state.detail?.id === m.id) area.innerHTML = `<div class="yt-note">${esc(err.message)}</div>`;
-  }
-}
-
-async function showYTPlaylist(i) {
-  const s = state.yt, area = $('#yt-area');
-  if (!s || !area) return;
-  s.sel = i;
-  const pl = s.found[i];
-  try { s.videos = await playlistVideos(pl.id); }
-  catch (err) { area.innerHTML = `<div class="yt-note">${esc(err.message)}</div>`; return; }
-  if (state.detail?.id !== s.media.id) return;
-  const last = store.get('ytlast', {})[s.media.id];
-  const chips = s.found.length > 1 ? `<div class="chips">${s.found.map((f, k) =>
-    `<button class="chip ${k === i ? 'on' : ''}" data-nav data-action="ytpl" data-idx="${k}">${esc(f.title)} <small>· ${esc(f.channel)}</small></button>`).join('')}</div>` : '';
-  const resume = last && last.pl === pl.id && s.videos[last.idx]
-    ? `<div class="btn-row" style="margin-bottom:16px"><button class="btn primary" data-nav data-action="ytplay" data-idx="${last.idx}">
-        <svg viewBox="0 0 24 24"><path d="M7 4v16l13-8z" fill="currentColor"/></svg>Continue EP ${s.videos[last.idx].ep}</button></div>` : '';
-  const tiles = s.videos.map((v, k) => `<div class="ep yt" tabindex="0" data-nav data-action="ytplay" data-idx="${k}">
-      <div class="ep-thumb"><img loading="lazy" src="${esc(v.thumb)}" alt=""><span class="ep-badge">▶ ${esc(pl.channel)}</span></div>
-      <div class="ep-title">EP ${v.ep}</div>
-      <div class="ep-sub">${esc(v.title)}</div>
-    </div>`).join('');
-  area.innerHTML = `${chips}${resume}<div class="d-sub">${s.videos.length} free video${s.videos.length === 1 ? '' : 's'} from ${esc(pl.channel)}. Some may be blocked in your country.</div>
-    <div class="ep-grid">${tiles || '<div class="d-sub">This playlist is empty.</div>'}</div>`;
-}
-
-/* ---------- YouTube player overlay ---------- */
-const YTP = { open: false, idx: 0, sel: 0 };
-const ytp = $('#ytplayer');
-
-function openYT(idx) {
-  const s = state.yt;
-  if (!s?.videos[idx]) return;
-  YTP.open = true;
-  ytp.hidden = false;
-  $('#yt-name').textContent = titleOf(s.media);
-  $('#yt-eps').innerHTML = s.videos.map((v, k) => `<div class="p-ep" data-yidx="${k}">
-      <img src="${esc(v.thumb)}" alt="" loading="lazy"><div><b>EP ${v.ep}</b><small>${esc(v.title)}</small></div></div>`).join('');
-  playYT(idx);
-  ytp.focus();
-}
-function playYT(idx) {
-  const s = state.yt, v = s.videos[idx], pl = s.found[s.sel];
-  if (!v) return;
-  YTP.idx = idx; YTP.sel = idx;
-  $('#yt-sub').textContent = `EP ${v.ep} · ${v.title}`;
-  $('#yt-frame').src = `https://www.youtube.com/embed/${encodeURIComponent(v.id)}?autoplay=1&rel=0&playsinline=1&list=${encodeURIComponent(pl.id)}`;
-  $$('#yt-eps .p-ep').forEach((el) => {
-    const on = Number(el.dataset.yidx) === idx;
-    el.classList.toggle('current', on); el.classList.remove('sel');
-  });
-  $(`#yt-eps .p-ep[data-yidx="${idx}"]`)?.scrollIntoView({ block: 'nearest' });
-  const last = store.get('ytlast', {});
-  last[s.media.id] = { pl: pl.id, idx };
-  store.set('ytlast', last);
-}
-function closeYT() {
-  YTP.open = false;
-  $('#yt-frame').src = 'about:blank';
-  if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
-  ytp.hidden = true;
-  if (state.yt) showYTPlaylist(state.yt.sel);
-}
-function ytKey(e) {
-  const n = state.yt?.videos.length || 0;
-  switch (e.key) {
-    case 'Escape': if (document.fullscreenElement) document.exitFullscreen().catch(() => {}); else closeYT(); break;
-    case 'Backspace': closeYT(); break;
-    case 'n': case 'N': if (YTP.idx + 1 < n) playYT(YTP.idx + 1); break;
-    case 'p': case 'P': if (YTP.idx > 0) playYT(YTP.idx - 1); break;
-    case 'f': case 'F':
-      if (document.fullscreenElement) document.exitFullscreen().catch(() => {}); else ytp.requestFullscreen().catch(() => {});
-      break;
-    case 'ArrowDown': YTP.sel = Math.min(n - 1, YTP.sel + 1); markYTSel(); break;
-    case 'ArrowUp': YTP.sel = Math.max(0, YTP.sel - 1); markYTSel(); break;
-    case 'Enter': playYT(YTP.sel); break;
-    default: return;
-  }
-  e.preventDefault();
-}
-function markYTSel() {
-  $$('#yt-eps .p-ep').forEach((el) => el.classList.toggle('sel', Number(el.dataset.yidx) === YTP.sel));
-  $(`#yt-eps .p-ep[data-yidx="${YTP.sel}"]`)?.scrollIntoView({ block: 'nearest' });
-}
-$('#yt-eps').addEventListener('click', (e) => { const el = e.target.closest('.p-ep'); if (el) playYT(Number(el.dataset.yidx)); });
-$('#yt-close').onclick = closeYT;
-$('#yt-ext').onclick = () => {
-  const v = state.yt?.videos[YTP.idx];
-  if (v) openExternal(`https://www.youtube.com/watch?v=${v.id}&list=${state.yt.found[state.yt.sel].id}`);
-};
-
-/* =========================================================
    Clock & start
    ========================================================= */
 function tick() {
   const t = clock12(new Date());
-  $('#clock').textContent = t; $('#p-clock').textContent = t; $('#yt-clock').textContent = t;
+  $('#clock').textContent = t; $('#p-clock').textContent = t;
 }
 tick(); setInterval(tick, 10000);
 updateAvatar();
 bridge?.onZoom?.((pct) => toast(`Zoom ${pct}%  (Ctrl + 0 to reset)`));
 window.addEventListener('beforeunload', saveProgress);
 
-render();
+// Log in to AniList in the background (if you were logged in before), then show the page
+Promise.race([alInit(), sleep(4000)]).finally(() => render());
