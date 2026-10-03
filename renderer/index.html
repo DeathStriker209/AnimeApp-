@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self'; img-src 'self' https: data: blob:; media-src 'self' file: blob:; connect-src https://graphql.anilist.co; style-src 'self' 'unsafe-inline'; script-src 'self'">
+  <title>Anime Stream+</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div id="app">
+    <header class="top">
+      <div class="logo" aria-label="Anime Stream+">ANIME<span>STREAM+</span></div>
+      <nav class="tabs">
+        <button class="tab" data-nav data-go="home">Home</button>
+        <button class="tab" data-nav data-go="browse">Browse</button>
+        <button class="tab" data-nav data-go="genres">Genres</button>
+        <button class="tab" data-nav data-go="movies">Movies</button>
+        <button class="tab" data-nav data-go="mylist">My List</button>
+      </nav>
+      <div class="top-right">
+        <label class="search">
+          <input id="search" data-nav type="search" placeholder="Search anime" autocomplete="off" spellcheck="false">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></svg>
+        </label>
+        <span class="clock" id="clock">--:--</span>
+      </div>
+    </header>
+
+    <main id="view" tabindex="-1"></main>
+
+    <footer class="bottom">
+      <button class="btab" data-nav data-go="home">
+        <svg viewBox="0 0 24 24"><path d="M3 11 12 4l9 7v9h-6v-6H9v6H3z"/></svg>Home</button>
+      <button class="btab" data-nav data-go="browse">
+        <svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>Browse</button>
+      <button class="btab" data-nav data-go="library">
+        <svg viewBox="0 0 24 24"><path d="M4 4v16M8 4v16M12 5l4 15M17 4l3 16"/></svg>My Library</button>
+      <button class="btab" data-nav data-go="settings">
+        <svg viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"/><path d="M4 21c1-4 4-6 8-6s7 2 8 6"/></svg>Profile</button>
+    </footer>
+  </div>
+
+  <!-- Player overlay -->
+  <section id="player" hidden tabindex="-1">
+    <div class="p-top">
+      <div class="logo small">ANIME<span>STREAM+</span></div>
+      <div class="p-title">
+        <div><b>Now playing:</b> <span id="p-name"></span></div>
+        <small id="p-sub"></small>
+      </div>
+      <span class="clock" id="p-clock">--:--</span>
+      <span class="pill" id="p-subs-pill" hidden>SUBS</span>
+      <button class="icon-btn" id="p-close" tabindex="-1" title="Close (Esc)">
+        <svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></svg></button>
+    </div>
+
+    <div class="p-body">
+      <div class="p-stage">
+        <video id="video" preload="metadata"></video>
+        <div class="p-flash" id="p-flash"></div>
+        <div class="p-msg" id="p-msg" hidden></div>
+        <div class="p-controls">
+          <div class="pbar" id="pbar">
+            <div class="pbar-buf" id="pbar-buf"></div>
+            <div class="pbar-fill" id="pbar-fill"></div>
+            <div class="pbar-knob" id="pbar-knob"></div>
+            <div class="pbar-tip" id="pbar-tip">0:00</div>
+          </div>
+          <div class="p-row">
+            <button class="icon-btn" id="b-play" tabindex="-1" title="Play / pause (Space)">
+              <svg class="i-play" viewBox="0 0 24 24"><path d="M7 4v16l13-8z" fill="currentColor"/></svg>
+              <svg class="i-pause" viewBox="0 0 24 24"><path d="M7 4h4v16H7zM14 4h4v16h-4z" fill="currentColor"/></svg>
+            </button>
+            <button class="icon-btn skip" id="b-back" tabindex="-1" title="Back 10 seconds (←)">
+              <svg viewBox="0 0 24 24"><path d="M4 12a8 8 0 1 0 2.3-5.7M4 4v4h4"/></svg><span>10</span></button>
+            <button class="icon-btn skip" id="b-fwd" tabindex="-1" title="Forward 10 seconds (→)">
+              <svg viewBox="0 0 24 24"><path d="M20 12a8 8 0 1 1-2.3-5.7M20 4v4h-4"/></svg><span>10</span></button>
+            <span class="p-time" id="p-time">0:00 / 0:00</span>
+            <div class="spacer"></div>
+            <button class="icon-btn" id="b-prev" tabindex="-1" title="Previous episode (P)">
+              <svg viewBox="0 0 24 24"><path d="M6 5v14M19 5 9 12l10 7z" fill="currentColor"/></svg></button>
+            <button class="icon-btn" id="b-next" tabindex="-1" title="Next episode (N)">
+              <svg viewBox="0 0 24 24"><path d="M18 5v14M5 5l10 7-10 7z" fill="currentColor"/></svg></button>
+            <button class="icon-btn" id="b-mute" tabindex="-1" title="Mute (M)">
+              <svg viewBox="0 0 24 24"><path d="M4 9h4l5-4v14l-5-4H4z" fill="currentColor"/><path class="i-waves" d="M16 9a4 4 0 0 1 0 6M18.5 6.5a8 8 0 0 1 0 11"/></svg></button>
+            <input type="range" id="vol" min="0" max="1" step="0.05" tabindex="-1" aria-label="Volume">
+            <span class="p-quality" id="p-quality">—</span>
+            <button class="icon-btn cc" id="b-cc" tabindex="-1" title="Subtitles (C)">CC</button>
+            <button class="icon-btn" id="b-list" tabindex="-1" title="Episode list (E)">
+              <svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16"/></svg></button>
+            <button class="icon-btn" id="b-full" tabindex="-1" title="Fullscreen (F)">
+              <svg viewBox="0 0 24 24"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg></button>
+          </div>
+        </div>
+      </div>
+      <aside class="p-list" id="p-list">
+        <h3>Episode list</h3>
+        <div class="p-eps" id="p-eps"></div>
+      </aside>
+    </div>
+  </section>
+
+  <div class="toast" id="toast" role="status" hidden></div>
+
+  <script src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,31 @@
+{
+  "name": "anime-stream-plus",
+  "productName": "Anime Stream+",
+  "version": "1.0.0",
+  "description": "Desktop anime browser and player with keyboard navigation",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder --win portable --publish never"
+  },
+  "devDependencies": {
+    "electron": "^33.0.0",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "com.animestreamplus.app",
+    "productName": "Anime Stream+",
+    "files": [
+      "main.js",
+      "preload.js",
+      "renderer/**/*"
+    ],
+    "win": {
+      "target": "portable"
+    },
+    "portable": {
+      "artifactName": "AnimeStreamPlus.exe"
+    }
+  },
+  "author": "Anime Stream+"
+}
