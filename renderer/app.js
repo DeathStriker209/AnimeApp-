@@ -40,6 +40,12 @@ function snap(m) {
   };
 }
 
+const clock12 = (d) => d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true });
+const getProfile = () => store.get('profile', { name: '' });
+const initial = (name) => (name || 'U').trim().charAt(0).toUpperCase() || 'U';
+const getSkip = () => { const n = Number(store.get('skip', 10)); return [5, 10, 15, 20].includes(n) ? n : 10; };
+function updateAvatar() { const a = $('#avatar'); if (a) { a.textContent = initial(getProfile().name); a.title = getProfile().name || 'Settings'; } }
+
 let toastTimer;
 function toast(msg) {
   const t = $('#toast');
@@ -132,14 +138,20 @@ function wideHTML(h) {
 
 const rail = (title, inner, cls = '') => inner ? `<h2 class="section">${esc(title)}</h2><div class="rail ${cls}">${inner}</div>` : '';
 
-const GENRES = [
-  ['Action', '#7a2b2b'], ['Adventure', '#7a5a22'], ['Comedy', '#6b6a1f'], ['Drama', '#5a2d6b'],
-  ['Fantasy', '#2b4f7a'], ['Horror', '#3d1e24'], ['Mecha', '#3e4a5c'], ['Music', '#6b2a55'],
-  ['Mystery', '#2f2a5e'], ['Psychological', '#4b2d4f'], ['Romance', '#7a2b4d'], ['Sci-Fi', '#1f5a6b'],
-  ['Slice of Life', '#2b6b5e'], ['Sports', '#2b6b3a'], ['Supernatural', '#4a2b7a'], ['Thriller', '#5c3a1e']
-];
-const genreTile = ([g, color]) =>
-  `<button class="genre" data-nav data-genre="${esc(g)}" style="--g:${color}"><span class="glyph">${esc(g.slice(0, 2))}</span>${esc(g)}</button>`;
+// Official AniList genres (18+ genres are left out on purpose)
+const GENRES = ['Action', 'Adventure', 'Comedy', 'Drama', 'Fantasy', 'Horror', 'Mahou Shoujo', 'Mecha', 'Music',
+  'Mystery', 'Psychological', 'Romance', 'Sci-Fi', 'Slice of Life', 'Sports', 'Supernatural', 'Thriller'];
+// Popular AniList tags shown as extra categories
+const TAGS = ['Isekai', 'Shounen', 'Shoujo', 'Seinen', 'Josei', 'Martial Arts', 'Super Power', 'Magic', 'School',
+  'Military', 'Historical', 'Samurai', 'Ninja', 'Vampire', 'Demons', 'Gods', 'Dragons', 'Mythology', 'Zombie',
+  'Survival', 'Post-Apocalyptic', 'Dystopian', 'Cyberpunk', 'Space', 'Robots', 'Time Manipulation', 'Reincarnation',
+  'Video Games', 'Virtual World', 'Detective', 'Crime', 'Tragedy', 'Iyashikei', 'Parody', 'Coming of Age',
+  'Found Family', 'Anti-Hero', 'Villainess', 'Urban Fantasy', 'Kaiju', 'Pirates', 'Food', 'Band', 'Idol',
+  'Workplace', 'Family Life', 'Delinquents', 'Boys\' Love', 'Yuri', 'Card Battle', 'Esports', 'Racing'];
+const CATEGORIES = [...GENRES.map((n) => ({ name: n, kind: 'genre' })), ...TAGS.map((n) => ({ name: n, kind: 'tag' }))];
+const catColor = (i) => `hsl(${(i * 47) % 360} 42% 28%)`;
+const genreTile = (c, i) =>
+  `<button class="genre" data-nav ${c.kind === 'tag' ? 'data-tag' : 'data-genre'}="${esc(c.name)}" style="--g:${catColor(i)}"><span class="glyph">${esc(c.name.slice(0, 2))}</span>${esc(c.name)}</button>`;
 
 const loadingHTML = () => `<div class="loading"><div><div class="spinner"></div>Loading…</div></div>`;
 const errorHTML = (err) => `<div class="empty"><h3>Couldn't load this page</h3>
@@ -149,16 +161,21 @@ const errorHTML = (err) => `<div class="empty"><h3>Couldn't load this page</h3>
 /* =========================================================
    Router
    ========================================================= */
-const state = { stack: [{ view: 'home', params: {} }], renderId: 0, heroTimer: null, heroIndex: 0, heroes: [] };
-const TAB_FOR = { home: 'home', browse: 'browse', genres: 'genres', movies: 'movies', mylist: 'mylist', library: 'library', settings: 'settings' };
+const state = { stack: [{ view: 'home', params: {} }], fwd: [], renderId: 0, heroTimer: null, heroIndex: 0, heroes: [] };
+const TAB_FOR = { home: 'home', schedule: 'schedule', browse: 'browse', genres: 'genres', movies: 'movies', mylist: 'mylist', library: 'library', settings: 'settings' };
 
-function go(view, params = {}, { reset = false } = {}) {
-  if (reset) state.stack = [];
+function go(view, params = {}) {
+  const top = state.stack[state.stack.length - 1];
+  if (top && top.view === view && JSON.stringify(top.params) === JSON.stringify(params)) { render(); return; }
   state.stack.push({ view, params });
+  state.fwd = [];
   render();
 }
 function back() {
-  if (state.stack.length > 1) { state.stack.pop(); render(); }
+  if (state.stack.length > 1) { state.fwd.push(state.stack.pop()); render(); }
+}
+function forward() {
+  if (state.fwd.length) { state.stack.push(state.fwd.pop()); render(); }
 }
 
 async function render({ keepScroll = false } = {}) {
@@ -206,19 +223,15 @@ const VIEWS = {
     state.heroIndex = 0;
 
     const history = Object.values(getHistory()).sort((a, b) => b.at - a.at);
-    const side = history.length
-      ? `<h2 class="section">Continue watching</h2><div class="side-list">${history.slice(0, 3).map(wideHTML).join('')}</div>`
-      : `<h2 class="section">Airing this season</h2><div class="side-list">${d.season.media.slice(0, 3)
-          .map((m) => wideHTML({ media: m, label: [FORMAT[m.format], m.episodes ? `${m.episodes} eps` : 'Airing'].filter(Boolean).join(' / '), time: 0, dur: 0 }).replace('data-action="resume" ', '')).join('')}</div>`;
+    const airing = d.season.media.map((m) => wideHTML({ media: m, label: [FORMAT[m.format], m.episodes ? `${m.episodes} eps` : 'Airing'].filter(Boolean).join(' / '), time: 0, dur: 0 })
+      .replace('data-action="resume" ', '').replace('<div class="prog"><i style="width:0%"></i></div>', '')).join('');
 
     return {
       html: `
-        <section class="home-top">
-          <div class="hero" id="hero">${heroHTML(state.heroes[0])}</div>
-          <aside class="side">${side}</aside>
-        </section>
-        ${history.length > 3 ? rail('Continue watching', history.map(wideHTML).join(''), 'wide-rail') : ''}
-        ${rail('Popular categories', GENRES.map(genreTile).join(''), 'genres-rail')}
+        <div class="hero" id="hero">${heroHTML(state.heroes[0])}</div>
+        ${history.length ? rail('Continue watching', history.map(wideHTML).join(''), 'wide-rail') : ''}
+        ${rail('Airing this season', airing, 'wide-rail')}
+        ${rail('Popular categories', CATEGORIES.slice(0, 24).map(genreTile).join(''), 'genres-rail')}
         ${rail('Trending now', trending.map((m) => cardHTML(m)).join(''))}
         ${rail(`Popular this season`, d.season.media.map((m) => cardHTML(m)).join(''))}
         ${rail('Recently started', d.recent.media.map((m) => cardHTML(m)).join(''))}
@@ -235,13 +248,11 @@ const VIEWS = {
   },
 
   async browse(params) {
-    const vars = { page: 1, q: params.q || undefined, g: params.genre || undefined, f: params.format || undefined,
-      sort: params.q ? ['SEARCH_MATCH'] : ['POPULARITY_DESC'] };
-    const d = await browseQuery(vars);
-    const title = params.title || (params.q ? `Results for "${params.q}"` : params.genre ? params.genre : 'Browse');
-    const chips = params.q || params.format ? '' : `<div class="chips">
+    const d = await browseQuery(browseVars(params, 1));
+    const title = params.title || (params.q ? `Results for "${params.q}"` : params.genre || params.tag || 'Browse');
+    const chips = params.q || params.format || params.tag ? '' : `<div class="chips">
       <button class="chip ${!params.genre ? 'on' : ''}" data-nav data-genre="">All</button>
-      ${GENRES.map(([g]) => `<button class="chip ${params.genre === g ? 'on' : ''}" data-nav data-genre="${esc(g)}">${esc(g)}</button>`).join('')}
+      ${GENRES.map((g) => `<button class="chip ${params.genre === g ? 'on' : ''}" data-nav data-genre="${esc(g)}">${esc(g)}</button>`).join('')}
     </div>`;
     const list = remember(d.Page.media);
     return {
@@ -253,7 +264,7 @@ const VIEWS = {
   },
 
   async genres() {
-    return { html: `<div class="page-title">Genres</div><div class="genre-grid">${GENRES.map(genreTile).join('')}</div>` };
+    return { html: `<div class="page-title">Genres</div><div class="genre-grid">${CATEGORIES.map(genreTile).join('')}</div>` };
   },
 
   async movies() {
@@ -285,25 +296,90 @@ const VIEWS = {
   },
 
   async settings() {
+    const prof = getProfile();
+    const skip = getSkip();
+    const hist = Object.values(getHistory()).length, list = Object.keys(getList()).length, lib = Object.keys(getLibrary()).length;
     const keys = [
-      ['← ↑ → ↓', 'Move around the app'], ['Enter', 'Open / select'], ['Esc or Backspace', 'Go back'], ['/', 'Jump to search'],
-      ['Space or K', 'Play / pause (player)'], ['← / J', 'Back 10 seconds'], ['→ / L', 'Forward 10 seconds'],
+      ['← ↑ → ↓', 'Move around the app'], ['Enter', 'Open / select'],
+      ['Esc or Backspace or Alt+←', 'Go back a page'], ['Alt+→', 'Go forward a page'], ['/', 'Jump to search'],
+      ['Space or K', 'Play / pause'], ['← or J', `Back ${skip} seconds`], ['→ or L', `Forward ${skip} seconds`],
       ['↑ / ↓', 'Volume'], ['F', 'Fullscreen'], ['M', 'Mute'], ['C', 'Subtitles'], ['N / P', 'Next / previous episode'],
       ['E', 'Episode list (then ↑ ↓ Enter)'], ['0–9', 'Jump to 0%–90%']
     ];
     return {
-      html: `<div class="page-title">Profile & settings</div>
+      html: `<div class="page-title">Settings</div>
+      <div class="settings-block"><h3>Profile</h3>
+        <div class="profile-row">
+          <div class="avatar big" id="avatar-big">${esc(initial(prof.name))}</div>
+          <label class="field">Display name
+            <input id="pname" type="text" data-nav data-autofocus maxlength="24" value="${esc(prof.name)}" placeholder="Your name"></label>
+        </div>
+        <div class="stats"><div><b>${hist}</b>watching</div><div><b>${list}</b>in My List</div><div><b>${lib}</b>with files on disk</div></div>
+      </div>
+      <div class="settings-block"><h3>Skip forward and back</h3>
+        <p>How far the skip buttons, arrow keys and double-click jump in the player.</p>
+        <div class="chips">${[5, 10, 15, 20].map((n) => `<button class="chip ${n === skip ? 'on' : ''}" data-nav data-action="set-skip" data-skip="${n}">${n} seconds</button>`).join('')}</div>
+      </div>
+      <div class="settings-block"><h3>Mouse in the player</h3>
+        <p>Click to play or pause. Double-click the left side to go back ${skip} seconds, the right side to go forward ${skip} seconds, or the middle for fullscreen. Mouse side buttons go back and forward a page.</p>
+      </div>
       <div class="settings-block"><h3>Keyboard shortcuts</h3>
         <div class="keys">${keys.map(([k, v]) => `<div>${k.split(' or ').map((x) => `<kbd>${esc(x)}</kbd>`).join(' or ')}</div><div>${esc(v)}</div>`).join('')}</div></div>
       <div class="settings-block"><h3>Where info comes from</h3>
-        <p>Titles, covers, descriptions and “Where to watch” links come from AniList. Episodes play from video files you link from your own computer.</p></div>
+        <p>Titles, covers, schedules, descriptions and “Where to watch” links come from AniList. Episodes play from video files you link from your own computer.</p></div>
       <div class="settings-block"><h3>Your data</h3>
         <p>Watch history, My List and linked files are stored on this computer only.</p>
         <div class="btn-row">
           <button class="btn" data-nav data-action="clear-history">Clear watch history</button>
           <button class="btn" data-nav data-action="clear-list">Clear My List</button>
           <button class="btn" data-nav data-action="clear-library">Unlink all files</button>
-        </div></div>`
+        </div></div>`,
+      after() {
+        $('#pname').addEventListener('input', (e) => {
+          const name = e.target.value.trim();
+          store.set('profile', { ...getProfile(), name });
+          $('#avatar-big').textContent = initial(name);
+          updateAvatar();
+        });
+      }
+    };
+  },
+
+  async schedule(params) {
+    const day = Number(params.day || 0);
+    const start = new Date(); start.setHours(0, 0, 0, 0); start.setDate(start.getDate() + day);
+    const s0 = Math.floor(start.getTime() / 1000), s1 = s0 + 86400;
+    const all = [];
+    for (let page = 1; page <= 4; page++) {
+      const d = await gql(`query($p: Int, $a: Int, $b: Int) { Page(page: $p, perPage: 50) { pageInfo { hasNextPage }
+        airingSchedules(airingAt_greater: $a, airingAt_lesser: $b, sort: TIME) { airingAt episode media { ...card isAdult } } } } ${CARD}`,
+        { p: page, a: s0, b: s1 });
+      all.push(...d.Page.airingSchedules);
+      if (!d.Page.pageInfo.hasNextPage) break;
+    }
+    const list = all.filter((x) => x.media && !x.media.isAdult);
+    remember(list.map((x) => x.media));
+    const now = Date.now() / 1000;
+    const days = Array.from({ length: 7 }, (_, i) => {
+      const dt = new Date(); dt.setDate(dt.getDate() + i);
+      const label = i === 0 ? 'Today' : i === 1 ? 'Tomorrow' : dt.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
+      return `<button class="chip ${i === day ? 'on' : ''}" data-nav ${i === day ? 'data-autofocus' : ''} data-action="day" data-day="${i}">${label}</button>`;
+    }).join('');
+    const rows = list.map((x) => {
+      const m = x.media, aired = x.airingAt <= now;
+      const left = x.airingAt - now, h = Math.floor(left / 3600), mi = Math.floor((left % 3600) / 60);
+      const when = aired ? 'Aired' : h > 0 ? `In ${h}h ${mi}m` : `In ${mi}m`;
+      return `<div class="sched ${aired ? 'aired' : ''}" tabindex="0" data-nav data-id="${m.id}">
+        <div class="sched-time">${clock12(new Date(x.airingAt * 1000))}</div>
+        <img loading="lazy" src="${esc(m.coverImage?.large || '')}" alt="">
+        <div class="sched-info"><div class="sched-title">${esc(titleOf(m))}</div>
+          <div class="sched-sub">Episode ${x.episode}${m.episodes ? ` of ${m.episodes}` : ''}${FORMAT[m.format] ? ` / ${FORMAT[m.format]}` : ''}</div></div>
+        <div class="sched-when">${when}</div>
+      </div>`;
+    }).join('');
+    return {
+      html: `<div class="page-title">Airing schedule</div><div class="chips">${days}</div>
+        ${rows ? `<div class="sched-list">${rows}</div>` : `<div class="empty"><h3>Nothing airing this day</h3>Pick another day above.</div>`}`
     };
   },
 
@@ -376,10 +452,14 @@ const VIEWS = {
   }
 };
 
+function browseVars(p, page) {
+  return { page, q: p.q || undefined, g: p.genre || undefined, t: p.tag || undefined, f: p.format || undefined,
+    sort: p.q ? ['SEARCH_MATCH'] : ['POPULARITY_DESC'] };
+}
 async function browseQuery(vars) {
-  return gql(`query($page: Int, $q: String, $g: String, $f: MediaFormat, $sort: [MediaSort]) {
+  return gql(`query($page: Int, $q: String, $g: String, $t: String, $f: MediaFormat, $sort: [MediaSort]) {
     Page(page: $page, perPage: 42) { pageInfo { hasNextPage }
-      media(search: $q, genre: $g, format: $f, sort: $sort, type: ANIME, isAdult: false) { ...card } }
+      media(search: $q, genre: $g, tag: $t, format: $f, sort: $sort, type: ANIME, isAdult: false) { ...card } }
   } ${CARD}`, vars);
 }
 
@@ -505,13 +585,12 @@ async function linkFiles(m) {
    ========================================================= */
 document.addEventListener('click', async (e) => {
   if (e.target.closest('#player')) return;
-  const t = e.target.closest('[data-go],[data-action],[data-ext],[data-ep],[data-genre],[data-hero],[data-id]');
+  const t = e.target.closest('[data-go],[data-action],[data-ext],[data-ep],[data-genre],[data-tag],[data-hero],[data-id]');
   if (!t) return;
 
   if (t.dataset.go) {
     const v = t.dataset.go;
-    if (v === 'movies') go('movies', { tab: 'movies' }, { reset: true });
-    else go(v, {}, { reset: true });
+    go(v, v === 'movies' ? { tab: 'movies' } : {});
     return;
   }
   if (t.dataset.hero != null) { setHero(Number(t.dataset.hero)); return; }
@@ -549,8 +628,7 @@ document.addEventListener('click', async (e) => {
       const p = state.stack[state.stack.length - 1].view === 'movies' ? { format: 'MOVIE' } : params;
       t.disabled = true; t.textContent = 'Loading…';
       try {
-        const d = await browseQuery({ page, q: p.q || undefined, g: p.genre || undefined, f: p.format || undefined,
-          sort: p.q ? ['SEARCH_MATCH'] : ['POPULARITY_DESC'] });
+        const d = await browseQuery(browseVars(p, page));
         const list = remember(d.Page.media);
         const grid = $('#grid');
         const firstNew = grid.children.length;
@@ -562,6 +640,10 @@ document.addEventListener('click', async (e) => {
       return;
     }
     case 'reload': gqlCache.clear(); render(); return;
+    case 'day': state.stack[state.stack.length - 1].params = { day: Number(t.dataset.day) }; render(); return;
+    case 'set-skip':
+      store.set('skip', Number(t.dataset.skip)); updateSkipUI();
+      toast(`Skip set to ${t.dataset.skip} seconds`); render({ keepScroll: true }); return;
     case 'clear-history': store.set('history', {}); toast('Watch history cleared'); return;
     case 'clear-list': store.set('mylist', {}); toast('My List cleared'); return;
     case 'clear-library': store.set('library', {}); toast('All files unlinked'); return;
@@ -577,6 +659,7 @@ document.addEventListener('click', async (e) => {
     toast(`EP ${n} has no file linked yet. Choose the episode files you have.`);
     return linkFiles(m2);
   }
+  if (t.dataset.tag) { go('browse', { tag: t.dataset.tag, tab: 'genres' }); return; }
   if (t.dataset.genre != null) {
     const g = t.dataset.genre;
     const inBrowse = state.stack[state.stack.length - 1].view === 'browse';
@@ -654,6 +737,12 @@ const ARROWS = { ArrowLeft: 'left', ArrowRight: 'right', ArrowUp: 'up', ArrowDow
 
 document.addEventListener('keydown', (e) => {
   document.body.classList.add('kbd');
+  if (e.altKey && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
+    e.preventDefault();
+    if (e.key === 'ArrowLeft') { if (P.open) closePlayer(); else back(); }
+    else if (!P.open) forward();
+    return;
+  }
   if (P.open) { playerKey(e); return; }
   const t = e.target;
   const typing = t.matches?.('input[type="search"], input[type="text"], textarea');
@@ -680,7 +769,12 @@ document.addEventListener('keydown', (e) => {
   }
 });
 document.addEventListener('mousedown', () => document.body.classList.remove('kbd'));
-window.addEventListener('mouseup', (e) => { if (e.button === 3) back(); }); // mouse "back" button
+// Mouse side buttons: 3 = back, 4 = forward
+window.addEventListener('mousedown', (e) => { if (e.button === 3 || e.button === 4) e.preventDefault(); });
+window.addEventListener('mouseup', (e) => {
+  if (e.button === 3) { e.preventDefault(); if (P.open) closePlayer(); else back(); }
+  if (e.button === 4) { e.preventDefault(); if (!P.open) forward(); }
+});
 
 /* =========================================================
    Player
@@ -786,17 +880,18 @@ function highlightEpisode() {
 function showMsg(text) { const m = $('#p-msg'); m.textContent = text; m.style.whiteSpace = 'pre-line'; m.hidden = false; }
 
 let flashTimer;
-function flash(text) {
+function flash(text, side = '') {
   const f = $('#p-flash');
   f.textContent = text; f.classList.add('show');
+  f.classList.toggle('left', side === 'left'); f.classList.toggle('right', side === 'right');
   clearTimeout(flashTimer);
   flashTimer = setTimeout(() => f.classList.remove('show'), 550);
 }
 
-function seek(delta) {
+function seek(delta, side = '') {
   if (!video.duration) return;
   video.currentTime = Math.max(0, Math.min(video.duration - 0.5, video.currentTime + delta));
-  flash(delta < 0 ? `⟲  ${Math.abs(delta)}s` : `${delta}s  ⟳`);
+  flash(delta < 0 ? `⟲  ${Math.abs(delta)}s` : `${delta}s  ⟳`, side);
   updateProgress();
 }
 function togglePlay() {
@@ -893,8 +988,8 @@ function playerKey(e) {
 
   switch (k) {
     case ' ': case 'k': case 'K': togglePlay(); break;
-    case 'ArrowLeft': case 'j': case 'J': seek(-10); break;
-    case 'ArrowRight': case 'l': case 'L': seek(10); break;
+    case 'ArrowLeft': case 'j': case 'J': seek(-getSkip()); break;
+    case 'ArrowRight': case 'l': case 'L': seek(getSkip()); break;
     case 'ArrowUp': setVolume(video.volume + 0.05); break;
     case 'ArrowDown': setVolume(video.volume - 0.05); break;
     case 'f': case 'F': toggleFullscreen(); break;
@@ -972,14 +1067,31 @@ video.addEventListener('error', () => {
   if (!video.getAttribute('src')) return;
   showMsg('This file can\'t be played.\nThe app plays MP4 and WebM, and MKV files encoded with H.264.\nFiles using HEVC (x265) or AC3/DTS audio may need converting to MP4 first.');
 });
-video.addEventListener('click', togglePlay);
-video.addEventListener('dblclick', toggleFullscreen);
+// Single click = play/pause. Double-click: left third = back, right third = forward, middle = fullscreen.
+let clickTimer = null;
+video.addEventListener('click', (e) => {
+  if (clickTimer) {
+    clearTimeout(clickTimer); clickTimer = null;
+    const r = video.getBoundingClientRect(), x = (e.clientX - r.left) / r.width;
+    if (x < 0.35) seek(-getSkip(), 'left');
+    else if (x > 0.65) seek(getSkip(), 'right');
+    else toggleFullscreen();
+    return;
+  }
+  clickTimer = setTimeout(() => { clickTimer = null; togglePlay(); }, 260);
+});
 
 /* Player buttons — keep focus on the player so keys keep working */
 $$('#player button, #vol').forEach((b) => b.addEventListener('mousedown', (e) => { if (b.id !== 'vol') e.preventDefault(); }));
 $('#b-play').onclick = togglePlay;
-$('#b-back').onclick = () => seek(-10);
-$('#b-fwd').onclick = () => seek(10);
+$('#b-back').onclick = () => seek(-getSkip());
+$('#b-fwd').onclick = () => seek(getSkip());
+function updateSkipUI() {
+  const n = getSkip();
+  $('#b-back span').textContent = n; $('#b-fwd span').textContent = n;
+  $('#b-back').title = `Back ${n} seconds (←)`; $('#b-fwd').title = `Forward ${n} seconds (→)`;
+}
+updateSkipUI();
 $('#b-prev').onclick = () => stepEpisode(-1);
 $('#b-next').onclick = () => stepEpisode(1);
 $('#b-mute').onclick = () => { video.muted = !video.muted; store.set('muted', video.muted); syncVolume(); };
@@ -998,10 +1110,11 @@ $('#p-eps').addEventListener('click', (e) => {
    Clock & start
    ========================================================= */
 function tick() {
-  const t = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
+  const t = clock12(new Date());
   $('#clock').textContent = t; $('#p-clock').textContent = t;
 }
 tick(); setInterval(tick, 10000);
+updateAvatar();
 window.addEventListener('beforeunload', saveProgress);
 
 render();
