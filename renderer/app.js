@@ -319,6 +319,17 @@ const VIEWS = {
         </div>
         <div class="stats"><div><b>${hist}</b>watching</div><div><b>${list}</b>in My List</div><div><b>${lib}</b>with files on disk</div></div>
       </div>
+      <div class="settings-block"><h3>Free episodes on YouTube</h3>
+        <p>The app finds full episodes that official anime channels (like Muse Asia and Ani-One) upload for free, and plays them inside the app.
+        It needs a free YouTube API key from Google.
+        <button class="link-btn inline" data-nav data-ext="https://console.cloud.google.com/apis/library/youtube.googleapis.com">Get a key</button></p>
+        <div class="field-col">
+          <label class="field">YouTube API key
+            <input id="ytkey" class="wide-input" type="text" data-nav spellcheck="false" autocomplete="off" value="${esc(getYT().key)}" placeholder="Paste your key here"></label>
+          <label class="field">Official channels to check (separate with commas)
+            <input id="ytch" class="wide-input" type="text" data-nav spellcheck="false" value="${esc(getYT().channels)}"></label>
+        </div>
+      </div>
       <div class="settings-block"><h3>Skip forward and back</h3>
         <p>How far the skip buttons, arrow keys and double-click jump in the player.</p>
         <div class="chips">${[5, 10, 15, 20].map((n) => `<button class="chip ${n === skip ? 'on' : ''}" data-nav data-action="set-skip" data-skip="${n}">${n} seconds</button>`).join('')}</div>
@@ -338,6 +349,8 @@ const VIEWS = {
           <button class="btn" data-nav data-action="clear-library">Unlink all files</button>
         </div></div>`,
       after() {
+        $('#ytkey').addEventListener('input', (e) => { store.set('youtube', { ...getYT(), key: e.target.value.trim() }); ytFound.clear(); });
+        $('#ytch').addEventListener('input', (e) => { store.set('youtube', { ...getYT(), channels: e.target.value }); ytFound.clear(); });
         $('#pname').addEventListener('input', (e) => {
           const name = e.target.value.trim();
           store.set('profile', { ...getProfile(), name });
@@ -388,7 +401,7 @@ const VIEWS = {
 
   async detail({ id }) {
     const d = await gql(`query($id: Int) { Media(id: $id) {
-      ...card title { native } description(asHtml: false) duration source season
+      ...card title { native } synonyms description(asHtml: false) duration source season
       studios(isMain: true) { nodes { name } }
       trailer { id site }
       externalLinks { site url type color }
@@ -446,11 +459,13 @@ const VIEWS = {
         </div>
         ${streaming.length ? `<div class="d-section"><h2 class="section">Where to watch</h2>
           <div class="chips">${streaming.map((l) => `<button class="chip ext" data-nav data-ext="${esc(l.url)}" style="--dot:${esc(l.color || '#4aa8ff')}"><i></i>${esc(l.site)}</button>`).join('')}</div></div>` : ''}
-        <div class="d-section"><h2 class="section">Episodes</h2>
+        <div class="d-section"><h2 class="section">Watch free on YouTube</h2><div id="yt-area"></div></div>
+        <div class="d-section"><h2 class="section">Episodes on your PC</h2>
           <div class="d-sub">${lib ? `${lib.files.length} on disk. ` : ''}Episodes without a linked file open on an official site when one is available.</div>
           <div id="ep-area">${episodesHTML(m)}</div></div>
         ${recs.length ? `<div class="d-section">${rail('You might also like', recs.map((r) => cardHTML(r)).join(''))}</div>` : ''}
-      </div>`
+      </div>`,
+      after() { loadYTSection(m); }
     };
   }
 };
@@ -625,7 +640,7 @@ async function linkFiles(m) {
    Click handling (mouse and Enter key)
    ========================================================= */
 document.addEventListener('click', async (e) => {
-  if (e.target.closest('#player')) return;
+  if (e.target.closest('#player') || e.target.closest('#ytplayer')) return;
   const t = e.target.closest('[data-go],[data-action],[data-ext],[data-ep],[data-genre],[data-tag],[data-hero],[data-id]');
   if (!t) return;
 
@@ -685,6 +700,8 @@ document.addEventListener('click', async (e) => {
       return;
     }
     case 'reload': gqlCache.clear(); render(); return;
+    case 'ytpl': showYTPlaylist(Number(t.dataset.idx)); return;
+    case 'ytplay': openYT(Number(t.dataset.idx)); return;
     case 'day': state.stack[state.stack.length - 1].params = { day: Number(t.dataset.day) }; render(); return;
     case 'set-skip':
       store.set('skip', Number(t.dataset.skip)); updateSkipUI();
@@ -732,7 +749,7 @@ $('#search').addEventListener('input', (e) => {
    Spatial keyboard navigation
    ========================================================= */
 function navigables() {
-  return $$('[data-nav]').filter((el) => !el.closest('#player') && el.offsetParent !== null && !el.disabled);
+  return $$('[data-nav]').filter((el) => !el.closest('#player') && !el.closest('#ytplayer') && el.offsetParent !== null && !el.disabled);
 }
 
 function moveFocus(dir) {
@@ -784,10 +801,11 @@ document.addEventListener('keydown', (e) => {
   document.body.classList.add('kbd');
   if (e.altKey && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
     e.preventDefault();
-    if (e.key === 'ArrowLeft') { if (P.open) closePlayer(); else back(); }
-    else if (!P.open) forward();
+    if (e.key === 'ArrowLeft') { if (YTP.open) closeYT(); else if (P.open) closePlayer(); else back(); }
+    else if (!P.open && !YTP.open) forward();
     return;
   }
+  if (YTP.open) { ytKey(e); return; }
   if (P.open) { playerKey(e); return; }
   const t = e.target;
   const typing = t.matches?.('input[type="search"], input[type="text"], textarea');
@@ -817,8 +835,8 @@ document.addEventListener('mousedown', () => document.body.classList.remove('kbd
 // Mouse side buttons: 3 = back, 4 = forward
 window.addEventListener('mousedown', (e) => { if (e.button === 3 || e.button === 4) e.preventDefault(); });
 window.addEventListener('mouseup', (e) => {
-  if (e.button === 3) { e.preventDefault(); if (P.open) closePlayer(); else back(); }
-  if (e.button === 4) { e.preventDefault(); if (!P.open) forward(); }
+  if (e.button === 3) { e.preventDefault(); if (YTP.open) closeYT(); else if (P.open) closePlayer(); else back(); }
+  if (e.button === 4) { e.preventDefault(); if (!P.open && !YTP.open) forward(); }
 });
 
 /* =========================================================
@@ -1185,11 +1203,241 @@ $('#p-eps').addEventListener('click', (e) => {
 });
 
 /* =========================================================
+   Free official episodes on YouTube
+   ========================================================= */
+const YT_API = 'https://www.googleapis.com/youtube/v3/';
+const DEFAULT_CHANNELS = '@MuseAsia, @AniOneAsia, @GundamInfo';
+const getYT = () => ({ key: '', channels: DEFAULT_CHANNELS, ...store.get('youtube', {}) });
+const ytChannels = () => getYT().channels.split(/[\s,]+/).map((h) => h.trim()).filter(Boolean).map((h) => (h.startsWith('@') ? h : '@' + h));
+const ytFound = new Map();   // anime id -> matching playlists
+const ytVideos = new Map();  // playlist id -> videos
+
+async function yt(endpoint, params) {
+  const key = getYT().key;
+  if (!key) throw new Error('Add your YouTube API key in Settings first.');
+  const res = await fetch(YT_API + endpoint + '?' + new URLSearchParams({ ...params, key }));
+  const json = await res.json().catch(() => ({}));
+  if (json.error) {
+    const reason = json.error.errors?.[0]?.reason || '';
+    if (reason === 'quotaExceeded') throw new Error('YouTube’s free daily limit is used up. It resets tomorrow.');
+    if (/key/i.test(reason) || /API key/i.test(json.error.message || '')) throw new Error('Your YouTube API key isn’t working. Check it in Settings.');
+    if (reason === 'accessNotConfigured') throw new Error('Turn on “YouTube Data API v3” for your key in Google Cloud.');
+    throw new Error(json.error.message || 'YouTube request failed.');
+  }
+  return json;
+}
+
+// All playlists of an official channel (cached for a day to save your daily limit)
+async function channelPlaylists(handle) {
+  const cache = store.get('ytcache', {});
+  const k = handle.toLowerCase();
+  if (cache[k] && Date.now() - cache[k].at < 86400000) return cache[k];
+  const ch = await yt('channels', { part: 'snippet', forHandle: handle });
+  const item = ch.items?.[0];
+  const entry = { at: Date.now(), title: item?.snippet?.title || handle, playlists: [] };
+  if (item) {
+    let pageToken = '';
+    for (let i = 0; i < 25; i++) {
+      const p = await yt('playlists', { part: 'snippet,contentDetails', channelId: item.id, maxResults: 50, ...(pageToken ? { pageToken } : {}) });
+      for (const pl of p.items || []) entry.playlists.push({ id: pl.id, title: pl.snippet.title, count: pl.contentDetails.itemCount });
+      pageToken = p.nextPageToken;
+      if (!pageToken) break;
+    }
+  }
+  cache[k] = entry;
+  store.set('ytcache', cache);
+  return entry;
+}
+
+const normT = (s) => (s || '').toLowerCase().normalize('NFKD').replace(/[\u0300-\u036f]/g, '').replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+const STOPWORDS = new Set(['the', 'a', 'an', 'of', 'no', 'to', 'wa', 'ga', 'wo', 'and', 'in', 'season', 'part', 'tv', 'anime']);
+const seasonOf = (t) => { const x = t.match(/\bseason (\d+)\b|\b(\d+)(?:st|nd|rd|th) season\b|\bs(\d+)\b/); return x ? Number(x[1] || x[2] || x[3]) : null; };
+
+function matchScore(playlistTitle, names) {
+  const pt = normT(playlistTitle), ptTok = new Set(pt.split(' '));
+  let best = 0;
+  for (const raw of names) {
+    const n = normT(raw);
+    if (n.length < 2) continue;
+    let sc;
+    if ((' ' + pt + ' ').includes(' ' + n + ' ')) sc = 1;
+    else {
+      const toks = n.split(' ').filter((t) => t.length > 1 && !STOPWORDS.has(t));
+      if (!toks.length) continue;
+      sc = (toks.filter((t) => ptTok.has(t)).length / toks.length) * 0.9;
+    }
+    const sp = seasonOf(pt), sn = seasonOf(n);
+    if (sp && sp > 1 && sp !== sn) sc -= 0.35;               // playlist is a different season
+    if (/\b(trailer|pv|teaser|clips?|opening|ending|preview|promo|shorts|music|ost)\b/.test(pt)) sc -= 0.5;
+    best = Math.max(best, sc);
+  }
+  return best;
+}
+
+async function findYouTube(m) {
+  if (ytFound.has(m.id)) return ytFound.get(m.id);
+  const names = [m.title?.english, m.title?.romaji, ...(m.synonyms || []).filter((x) => /^[\x00-\x7F]+$/.test(x))].filter(Boolean);
+  const results = await Promise.allSettled(ytChannels().map(channelPlaylists));
+  const firstError = results.find((r) => r.status === 'rejected');
+  const found = [];
+  for (const r of results) {
+    if (r.status !== 'fulfilled') continue;
+    for (const pl of r.value.playlists) {
+      if (!pl.count) continue;
+      const score = matchScore(pl.title, names);
+      if (score >= 0.75) found.push({ ...pl, channel: r.value.title, score });
+    }
+  }
+  if (!found.length && firstError) throw firstError.reason;
+  found.sort((a, b) => b.score - a.score || b.count - a.count);
+  const top = found.slice(0, 6);
+  ytFound.set(m.id, top);
+  return top;
+}
+
+async function playlistVideos(plId) {
+  if (ytVideos.has(plId)) return ytVideos.get(plId);
+  const list = [];
+  let pageToken = '';
+  for (let i = 0; i < 6; i++) {
+    const p = await yt('playlistItems', { part: 'snippet,status', playlistId: plId, maxResults: 50, ...(pageToken ? { pageToken } : {}) });
+    for (const it of p.items || []) {
+      const sn = it.snippet;
+      if (it.status?.privacyStatus && it.status.privacyStatus !== 'public' && it.status.privacyStatus !== 'unlisted') continue;
+      if (/^(private|deleted) video$/i.test(sn.title)) continue;
+      const ep = Number(sn.title.match(/(?:\bep(?:isode)?\.?\s*|#)(\d{1,4})\b/i)?.[1]) || null;
+      list.push({ id: sn.resourceId.videoId, title: sn.title, thumb: sn.thumbnails?.medium?.url || sn.thumbnails?.default?.url || '', ep });
+    }
+    pageToken = p.nextPageToken;
+    if (!pageToken) break;
+  }
+  // Put episodes in order when every title has an episode number
+  if (list.length && list.every((v) => v.ep)) list.sort((a, b) => a.ep - b.ep);
+  list.forEach((v, i) => { if (!v.ep) v.ep = i + 1; });
+  ytVideos.set(plId, list);
+  return list;
+}
+
+async function loadYTSection(m) {
+  const area = $('#yt-area');
+  if (!area) return;
+  if (!getYT().key) {
+    area.innerHTML = `<div class="yt-note">Find free full episodes from official channels like Muse Asia and Ani-One and play them right here.
+      It needs a free YouTube API key.<div><button class="btn" data-nav data-go="settings">Add key in Settings</button></div></div>`;
+    return;
+  }
+  area.innerHTML = `<div class="d-sub">Checking official channels…</div>`;
+  try {
+    const found = await findYouTube(m);
+    if (state.detail?.id !== m.id) return;
+    if (!found.length) {
+      area.innerHTML = `<div class="yt-note">No free official episodes found on ${esc(ytChannels().join(', '))}. Availability depends on your country.
+        <div><button class="btn" data-nav data-ext="https://www.youtube.com/results?search_query=${encodeURIComponent(titleOf(m) + ' episode 1 official')}">Search YouTube</button></div></div>`;
+      return;
+    }
+    state.yt = { media: m, found, sel: 0, videos: [] };
+    const last = store.get('ytlast', {})[m.id];
+    const idx = last ? Math.max(0, found.findIndex((f) => f.id === last.pl)) : 0;
+    await showYTPlaylist(idx);
+  } catch (err) {
+    if (state.detail?.id === m.id) area.innerHTML = `<div class="yt-note">${esc(err.message)}</div>`;
+  }
+}
+
+async function showYTPlaylist(i) {
+  const s = state.yt, area = $('#yt-area');
+  if (!s || !area) return;
+  s.sel = i;
+  const pl = s.found[i];
+  try { s.videos = await playlistVideos(pl.id); }
+  catch (err) { area.innerHTML = `<div class="yt-note">${esc(err.message)}</div>`; return; }
+  if (state.detail?.id !== s.media.id) return;
+  const last = store.get('ytlast', {})[s.media.id];
+  const chips = s.found.length > 1 ? `<div class="chips">${s.found.map((f, k) =>
+    `<button class="chip ${k === i ? 'on' : ''}" data-nav data-action="ytpl" data-idx="${k}">${esc(f.title)} <small>· ${esc(f.channel)}</small></button>`).join('')}</div>` : '';
+  const resume = last && last.pl === pl.id && s.videos[last.idx]
+    ? `<div class="btn-row" style="margin-bottom:16px"><button class="btn primary" data-nav data-action="ytplay" data-idx="${last.idx}">
+        <svg viewBox="0 0 24 24"><path d="M7 4v16l13-8z" fill="currentColor"/></svg>Continue EP ${s.videos[last.idx].ep}</button></div>` : '';
+  const tiles = s.videos.map((v, k) => `<div class="ep yt" tabindex="0" data-nav data-action="ytplay" data-idx="${k}">
+      <div class="ep-thumb"><img loading="lazy" src="${esc(v.thumb)}" alt=""><span class="ep-badge">▶ ${esc(pl.channel)}</span></div>
+      <div class="ep-title">EP ${v.ep}</div>
+      <div class="ep-sub">${esc(v.title)}</div>
+    </div>`).join('');
+  area.innerHTML = `${chips}${resume}<div class="d-sub">${s.videos.length} free video${s.videos.length === 1 ? '' : 's'} from ${esc(pl.channel)}. Some may be blocked in your country.</div>
+    <div class="ep-grid">${tiles || '<div class="d-sub">This playlist is empty.</div>'}</div>`;
+}
+
+/* ---------- YouTube player overlay ---------- */
+const YTP = { open: false, idx: 0, sel: 0 };
+const ytp = $('#ytplayer');
+
+function openYT(idx) {
+  const s = state.yt;
+  if (!s?.videos[idx]) return;
+  YTP.open = true;
+  ytp.hidden = false;
+  $('#yt-name').textContent = titleOf(s.media);
+  $('#yt-eps').innerHTML = s.videos.map((v, k) => `<div class="p-ep" data-yidx="${k}">
+      <img src="${esc(v.thumb)}" alt="" loading="lazy"><div><b>EP ${v.ep}</b><small>${esc(v.title)}</small></div></div>`).join('');
+  playYT(idx);
+  ytp.focus();
+}
+function playYT(idx) {
+  const s = state.yt, v = s.videos[idx], pl = s.found[s.sel];
+  if (!v) return;
+  YTP.idx = idx; YTP.sel = idx;
+  $('#yt-sub').textContent = `EP ${v.ep} · ${v.title}`;
+  $('#yt-frame').src = `https://www.youtube.com/embed/${encodeURIComponent(v.id)}?autoplay=1&rel=0&playsinline=1&list=${encodeURIComponent(pl.id)}`;
+  $$('#yt-eps .p-ep').forEach((el) => {
+    const on = Number(el.dataset.yidx) === idx;
+    el.classList.toggle('current', on); el.classList.remove('sel');
+  });
+  $(`#yt-eps .p-ep[data-yidx="${idx}"]`)?.scrollIntoView({ block: 'nearest' });
+  const last = store.get('ytlast', {});
+  last[s.media.id] = { pl: pl.id, idx };
+  store.set('ytlast', last);
+}
+function closeYT() {
+  YTP.open = false;
+  $('#yt-frame').src = 'about:blank';
+  if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+  ytp.hidden = true;
+  if (state.yt) showYTPlaylist(state.yt.sel);
+}
+function ytKey(e) {
+  const n = state.yt?.videos.length || 0;
+  switch (e.key) {
+    case 'Escape': if (document.fullscreenElement) document.exitFullscreen().catch(() => {}); else closeYT(); break;
+    case 'Backspace': closeYT(); break;
+    case 'n': case 'N': if (YTP.idx + 1 < n) playYT(YTP.idx + 1); break;
+    case 'p': case 'P': if (YTP.idx > 0) playYT(YTP.idx - 1); break;
+    case 'f': case 'F':
+      if (document.fullscreenElement) document.exitFullscreen().catch(() => {}); else ytp.requestFullscreen().catch(() => {});
+      break;
+    case 'ArrowDown': YTP.sel = Math.min(n - 1, YTP.sel + 1); markYTSel(); break;
+    case 'ArrowUp': YTP.sel = Math.max(0, YTP.sel - 1); markYTSel(); break;
+    case 'Enter': playYT(YTP.sel); break;
+    default: return;
+  }
+  e.preventDefault();
+}
+function markYTSel() {
+  $$('#yt-eps .p-ep').forEach((el) => el.classList.toggle('sel', Number(el.dataset.yidx) === YTP.sel));
+  $(`#yt-eps .p-ep[data-yidx="${YTP.sel}"]`)?.scrollIntoView({ block: 'nearest' });
+}
+$('#yt-eps').addEventListener('click', (e) => { const el = e.target.closest('.p-ep'); if (el) playYT(Number(el.dataset.yidx)); });
+$('#yt-close').onclick = closeYT;
+$('#yt-ext').onclick = () => {
+  const v = state.yt?.videos[YTP.idx];
+  if (v) openExternal(`https://www.youtube.com/watch?v=${v.id}&list=${state.yt.found[state.yt.sel].id}`);
+};
+
+/* =========================================================
    Clock & start
    ========================================================= */
 function tick() {
   const t = clock12(new Date());
-  $('#clock').textContent = t; $('#p-clock').textContent = t;
+  $('#clock').textContent = t; $('#p-clock').textContent = t; $('#yt-clock').textContent = t;
 }
 tick(); setInterval(tick, 10000);
 updateAvatar();
