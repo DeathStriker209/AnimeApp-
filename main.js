@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog, shell } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, shell, session } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const { pathToFileURL } = require('url');
@@ -124,6 +124,16 @@ ipcMain.handle('open-external', async (_e, url) => {
 });
 
 app.whenReady().then(() => {
+  // YouTube embeds refuse to play (error 153) when the page sends no Referer, which is the case for
+  // apps loaded from local files. Add one to YouTube embed requests that don't have it.
+  session.defaultSession.webRequest.onBeforeSendHeaders(
+    { urls: ['https://www.youtube.com/*', 'https://www.youtube-nocookie.com/*'] },
+    (details, callback) => {
+      const h = details.requestHeaders;
+      if (!h.Referer && !h.referer) h.Referer = 'https://www.youtube.com/';
+      callback({ requestHeaders: h });
+    }
+  );
   createWindow();
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
