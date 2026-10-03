@@ -4,7 +4,7 @@
    Helpers
    ========================================================= */
 const API_URL = 'https://graphql.anilist.co';
-const api = window.api || null; // provided by preload.js inside Electron
+const bridge = window.api || null; // provided by preload.js inside Electron
 
 const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => [...r.querySelectorAll(s)];
@@ -49,7 +49,7 @@ function toast(msg) {
 }
 
 function openExternal(url) {
-  if (api) api.openExternal(url); else window.open(url, '_blank', 'noopener');
+  if (bridge) bridge.openExternal(url); else window.open(url, '_blank', 'noopener');
 }
 
 /* =========================================================
@@ -474,8 +474,8 @@ function guessEp(name) {
 }
 
 async function linkFiles(m) {
-  if (!api) { toast('Linking files works in the desktop app. Start it with npm start.'); return; }
-  const files = await api.pickVideos();
+  if (!bridge) { toast('Linking files works in the desktop app. Start it with npm start.'); return; }
+  const files = await bridge.pickVideos();
   if (!files.length) return;
   const lib = getLibrary();
   const entry = lib[m.id] || { media: snap(m), files: [] };
@@ -721,14 +721,14 @@ async function loadEpisode(ep) {
 
   video.pause();
   video.removeAttribute('src');
-  if (api && f.path && !(await api.fileExists(f.path))) {
+  if (bridge && f.path && !(await bridge.fileExists(f.path))) {
     showMsg(`Can't find this file anymore:\n${f.path}\n\nIt may have been moved or deleted. Use “Add more files” on the anime page to link it again.`);
     return;
   }
   video.src = f.url;
   video.play().catch(() => {});
-  if (f.sub && api) {
-    const s = await api.readSubtitle(f.sub);
+  if (f.sub && bridge) {
+    const s = await bridge.readSubtitle(f.sub);
     if (s) addSubtitle(s.text, s.name);
   }
   highlightEpisode();
@@ -844,8 +844,8 @@ async function toggleSubs() {
     P.subOn = !P.subOn;
     tr.mode = P.subOn ? 'showing' : 'hidden';
     flash(P.subOn ? 'Subtitles on' : 'Subtitles off');
-  } else if (api) {
-    const s = await api.pickSubtitle();
+  } else if (bridge) {
+    const s = await bridge.pickSubtitle();
     if (s) { addSubtitle(s.text, s.name); flash('Subtitles on'); }
   } else flash('No subtitles');
   updateSubsUI();
